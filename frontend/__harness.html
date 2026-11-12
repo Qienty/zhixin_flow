@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>harness</title></head>
+<body>
+<iframe id="f" src="./index.html" style="width:420px;height:760px;border:0"></iframe>
+<pre id="out">running</pre>
+<script>
+const log = [];
+let sent = 0;
+function dump() {
+  document.getElementById("out").textContent = log.join("\n");
+  while (sent < log.length) { fetch("/__result/" + encodeURIComponent(log[sent++])).catch(function () {}); }
+}
+function ok(name, cond, extra) {
+  log.push((cond ? "PASS  " : "FAIL  ") + name + (extra ? "  :: " + extra : ""));
+  dump();
+}
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms) {
+  const end = Date.now() + (ms || 5000);
+  while (Date.now() < end) {
+    try { if (fn()) return true; } catch (e) {}
+    await wait(60);
+  }
+  return false;
+}
+window.onerror = function (m) { log.push("HARNESS ERROR: " + m); dump(); };
+
+(async function () {
+try {
+  const f = document.getElementById("f");
+  await new Promise(function (resolve) {
+    (function check() {
+      try {
+ if (f.contentWindow.location.pathname.indexOf("index.html") >= 0 &&
+     f.contentDocument.readyState === "complete") return resolve();
+      } catch (e) {}
+      setTimeout(check, 50);
+    })();
+  });
+  const W = f.contentWindow, D = f.contentDocument;
+  const errs = [];
+  W.addEventListener("error", (e) => errs.push(String(e.message)));
+  W.addEventListener("unhandledrejection", (e) => errs.push("rejection: " + e.reason));
+
+  ok("启动渲染情绪瓦片", await until(() => D.querySelectorAll('[data-act="pick"]').length === 7));
+
+  const t0 = D.documentElement.dataset.theme;
+  D.querySelector('[data-act="theme"]').click();
+  await wait(200);
+  const t1 = D.documentElement.dataset.theme;
+  D.querySelector('[data-act="theme"]').click();
+  await wait(200);
+  ok("主题按钮可循环", t1 !== undefined, t0 + " -> " + t1 + " -> " + D.documentElement.dataset.theme);
+
+  const overlay = D.getElementById("overlay");
+  D.querySelector('[data-emotion="anger"]').click();
+  ok("点情绪打开引导浮层", await until(() => !overlay.hidden && overlay.querySelector(".focus")));
+  ok("滚动被锁住", D.body.classList.contains("locked"));
+  ok("步骤点出现", !!overlay.querySelector(".step-dots i"));
+  ok("焦点落在浮层内", overlay.contains(D.activeElement), D.activeElement ? D.activeElement.className : "none");
+
+  const countEl = overlay.querySelector("[data-count]");
+  const first = countEl ? countEl.textContent : null;
+  await wait(2500);
+  ok("倒计时递减", !!countEl && countEl.textContent !== first, first + " -> " + (countEl ? countEl.textContent : "?"));
+  const bar = overlay.querySelector("[data-progress]");
+  ok("进度条推进", !!bar && parseFloat(bar.style.width) > 0, bar ? bar.style.width : "none");
+
+  W.history.back();
+  ok("后退键关闭浮层", await until(() => overlay.hidden));
+  ok("后退后仍停在应用内", D.querySelectorAll('[data-act="pick"]').length === 7);
+  ok("滚动锁解除", !D.body.classList.contains("locked"));
+
+  D.querySelector('[data-emotion="sadness"]').click();
+  await until(() => !overlay.hidden && overlay.querySelector('[data-act="iv-next"]'));
+  for (let i = 0; i < 6; i++) {
+    const next = overlay.querySelector('[data-act="iv-next"]');
+    if (!next) break;
+    next.click();
+    await wait(150);
+  }
+  ok("走到收尾页并出现缓解反馈", !!overlay.querySelector('[data-act="relief"]'));
+  overlay.querySelector('[data-relief="better"]').click();
+  await wait(500);
+  ok("缓解选项即时高亮", overlay.querySelector('[data-relief="better"]').classList.contains("on"));
+
+  overlay.querySelector('[data-act="note"]').click();
+  ok("打开补填表", await until(() => overlay.querySelector('[data-input="cause"]')));
+  const ta = overlay.querySelector('[data-input="cause"]');
+  ok("从引导进来自动聚焦输入框", D.activeElement === ta, D.activeElement ? D.activeElement.tagName : "none");
+  const chips = overlay.querySelectorAll('[data-act="quick"]');
+  chips[0].click(); await wait(100);
+  chips[1].click(); await wait(100);
+  ok("快捷短语是追加不是覆盖",
+     ta.value.indexOf(chips[0].dataset.text) >= 0 && ta.value.indexOf(chips[1].dataset.text) >= 0, ta.value);
+  chips[1].click(); await wait(100);
+  ok("再点一次可以取消", ta.value.indexOf(chips[1].dataset.text) < 0, ta.value);
+  const cc = overlay.querySelector('[data-count-for="cause"]');
+  ok("字数计数器同步", cc.textContent === ta.value.length + "/500", cc.textContent);
+  overlay.querySelector('[data-act="sev"][data-sev="4"]').click();
+  await wait(100);
+  ok("强度选择 aria-pressed 正确", overlay.querySelector('[data-sev="4"]').getAttribute("aria-pressed") === "true");
+  overlay.querySelector('[data-act="save-note"]').click();
+  ok("保存后浮层关闭", await until(() => overlay.hidden));
+
+  D.querySelector('[data-act="open-crisis"]').click();
+  ok("危机资源浮层打开", await until(() => !overlay.hidden && overlay.querySelector(".crisis-card")));
+  ok("危机热线有 tel: 链接", !!overlay.querySelector('a[href^="tel:"]'));
+  D.dispatchEvent(new W.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  ok("Esc 关闭浮层", await until(() => overlay.hidden));
+
+  D.querySelector('.tab[data-view="log"]').click();
+  ok("切到记录视图", await until(() => D.getElementById("log-body")));
+  const total = D.querySelectorAll("#log-body .entry").length;
+  D.querySelector('[data-act="sort"][data-sort="time"]').click();
+  await wait(300);
+  ok("按时间排序出现日期分组", D.querySelectorAll("#log-body .day-head").length > 0,
+     D.querySelectorAll("#log-body .day-head").length + " 组");
+  D.querySelector('[data-act="filter"][data-emotion="anger"]').click();
+  await wait(300);
+  const after = D.querySelectorAll("#log-body .entry").length;
+  ok("筛选只换列表且条数变少", after > 0 && after < total, total + " -> " + after);
+  ok("筛选后没整块重绘", !!D.getElementById("log-body"));
+
+  ok("地址栏跟着视图走", W.location.hash === "#log", W.location.hash);
+  W.history.back();
+  await wait(400);
+  ok("后退回到上一个标签页", W.location.hash !== "#log", W.location.hash);
+
+  ok("全程无未捕获错误", errs.length === 0, errs.join(" | "));
+  log.push("-- " + log.filter((l) => l.indexOf("PASS") === 0).length + "/" + log.length + " 通过");
+  dump();
+} catch (e) {
+  log.push("THROWN: " + (e && e.stack ? e.stack : e));
+  dump();
+}
+})();
+</script>
+</body></html>

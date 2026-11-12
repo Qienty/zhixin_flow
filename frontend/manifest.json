@@ -1,0 +1,21 @@
+{
+  "name": "Tether · 情绪记录与自我调节",
+  "short_name": "Tether",
+  "description": "低摩擦记录、按严重程度排序、峰值时刻的 30 秒引导。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F6F3EC",
+  "theme_color": "#3E5B4B",
+  "lang": "zh-CN",
+  "categories": ["health", "lifestyle"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

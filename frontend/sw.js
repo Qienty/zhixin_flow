@@ -1,0 +1,66 @@
+/* Tether service worker
+   目的只有两个：装到主屏后能离线打开外壳、二次启动不用干等网络。
+   策略刻意选了「网络优先 + 缓存兜底」而不是缓存优先——
+   这是个本地跑的 demo，改一行 JS 就该立刻生效，不该被 SW 的缓存挡住。
+   /api 一律不碰：情绪记录不进缓存，离线时让请求自然失败，前端已经有 toast。 */
+
+const VERSION = "tether-v1";
+
+const SHELL = [
+  "./",
+  "./index.html",
+  "./css/app.css",
+  "./js/app.js",
+  "./js/api.js",
+  "./js/i18n.js",
+  "./manifest.json",
+  "./icon.svg",
+];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches
+      .open(VERSION)
+      .then((cache) => cache.addAll(SHELL))
+      .catch(() => null)
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+async function networkFirst(request) {
+  try {
+    const res = await fetch(request);
+    if (res && res.ok) {
+      const cache = await caches.open(VERSION);
+      await cache.put(request, res.clone());
+    }
+    return res;
+  } catch (err) {
+    const hit = await caches.match(request);
+    if (hit) return hit;
+    // 单页应用：导航请求离线时一律回首页外壳
+    if (request.mode === "navigate") {
+      const shell = await caches.match("./index.html");
+      if (shell) return shell;
+    }
+    return new Response("offline", { status: 503, headers: { "Content-Type": "text/plain" } });
+  }
+}
+
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  if (request.method !== "GET") return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith("/api/")) return;
+  event.respondWith(networkFirst(request));
+});

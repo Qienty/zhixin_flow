@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时数据（首次启动自动生成，删掉即重置）
+backend/data/*.db
+backend/data/*.db-journal
+
+# 环境与密钥
+.env
+.env.*
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
