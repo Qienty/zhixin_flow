@@ -643,6 +643,53 @@ a { color: var(--moss); }
   background: var(--line-strong);
 }
 
+/* -------------------------------------------------------- 确认对话框 */
+/* 单独一层，压在任何 sheet 之上；不复用 #overlay 是为了不打断底下的编辑状态 */
+.confirm-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.confirm-layer[hidden] { display: none; }
+.confirm-veil {
+  position: absolute;
+  inset: 0;
+  background: var(--veil-2);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: fade 0.18s ease;
+}
+.confirm-card {
+  position: relative;
+  width: min(420px, 100%);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  padding: 22px 20px;
+  box-shadow: 0 26px 60px -26px rgba(0, 0, 0, 0.5);
+  animation: confirm-in 0.2s cubic-bezier(0.2, 0.85, 0.2, 1);
+}
+@keyframes confirm-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+}
+.confirm-title {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+.confirm-body { color: var(--ink-2); margin: 0; }
+html.confirm-open,
+html.confirm-open body { overflow: hidden; }
+
+.btn.danger-solid { background: var(--brick); border-color: transparent; color: #fff; }
+.btn.danger-solid:hover { background: var(--brick); filter: brightness(1.06); }
+:root[data-theme="dark"] .btn.danger-solid { color: #1a1412; }
+
 .focus {
   position: relative;
   width: min(600px, 100%);

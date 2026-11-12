@@ -1127,6 +1127,75 @@ function sheetClose(extra = "") {
   </button>`;
 }
 
+/* ------------------------------------------------------------ 确认对话框 */
+
+/* 原生 window.confirm 在嵌入式 webview / 跨域 iframe 里会被静默吞掉——直接返回 false，
+   于是「删除」和「清空数据」点了像没反应。改成应用内的一层确认卡，顺便和设计体系对齐。
+
+   刻意不复用 #overlay：删除按钮在记录编辑浮层里，那层可能有用户还没保存的原因。
+   另起一层叠在上面，取消后底下原封不动。 */
+let confirmLayer = null;
+let confirmResolver = null;
+let confirmRestoreFocus = null;
+
+function ensureConfirmLayer() {
+  if (confirmLayer) return confirmLayer;
+  confirmLayer = document.createElement("div");
+  confirmLayer.className = "confirm-layer";
+  confirmLayer.hidden = true;
+  confirmLayer.innerHTML = `
+    <div class="confirm-veil" data-act="confirm-cancel"></div>
+    <div class="confirm-card" role="alertdialog" aria-modal="true">
+      <h2 class="confirm-title"></h2>
+      <p class="confirm-body small"></p>
+      <div class="row" style="gap:10px;margin-top:18px">
+        <button class="btn ghost block" data-act="confirm-cancel"></button>
+        <button class="btn danger-solid block" data-act="confirm-ok"></button>
+      </div>
+    </div>`;
+  document.body.appendChild(confirmLayer);
+  return confirmLayer;
+}
+
+function settleConfirm(value) {
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  if (confirmLayer) confirmLayer.hidden = true;
+  document.documentElement.classList.remove("confirm-open");
+  /* 解开底下那层的惰性，焦点还回去 */
+  if (overlay) overlay.inert = false;
+  if (confirmRestoreFocus && document.contains(confirmRestoreFocus)) {
+    confirmRestoreFocus.focus({ preventScroll: true });
+  }
+  confirmRestoreFocus = null;
+  if (resolve) resolve(value);
+}
+
+function askConfirm({ title, body = "", ok, cancel = t("common.cancel") }) {
+  settleConfirm(false); // 上一个没结算的按取消处理，避免两个确认卡叠着
+  const layer = ensureConfirmLayer();
+  confirmRestoreFocus = document.activeElement;
+  layer.querySelector(".confirm-title").textContent = title;
+  const bodyNode = layer.querySelector(".confirm-body");
+  bodyNode.textContent = body;
+  bodyNode.hidden = !body;
+  /* 必须写 button[...]：遮罩层也带 data-act="confirm-cancel"，
+     只按属性选会命中遮罩，文案写不进去、focus 也会落空。 */
+  const okBtn = layer.querySelector('button[data-act="confirm-ok"]');
+  const cancelBtn = layer.querySelector('button[data-act="confirm-cancel"]');
+  okBtn.textContent = ok;
+  cancelBtn.textContent = cancel;
+  layer.hidden = false;
+  document.documentElement.classList.add("confirm-open");
+  /* 底下那层设成 inert：它只是被盖住了，不该还能用 Tab 走到、也不该被回车误触 */
+  if (!overlay.hidden) overlay.inert = true;
+  /* 等一帧再聚焦：层刚显示出来时同步 focus 会被丢掉 */
+  requestAnimationFrame(() => cancelBtn.focus({ preventScroll: true }));
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+  });
+}
+
 /* ------------------------------------------------------------- 干预流程 */
 
 const iv = { entryId: null, data: null, step: 0, token: 0, relief: null, crisis: null, nodes: null, lastPct: -1 };
@@ -1697,7 +1766,12 @@ async function doSeed() {
 }
 
 async function doReset() {
-  if (!window.confirm(t("me.reset_confirm"))) return;
+  const ok = await askConfirm({
+    title: t("me.reset"),
+    body: t("me.reset_confirm"),
+    ok: t("me.reset_ok"),
+  });
+  if (!ok) return;
   try {
     await api.resetAll();
     invalidateInsights();
@@ -1749,7 +1823,12 @@ async function setPlan(plan) {
 }
 
 async function removeEntry(id) {
-  if (!window.confirm(t("common.delete_confirm"))) return;
+  const ok = await askConfirm({
+    title: t("common.delete"),
+    body: t("common.delete_confirm"),
+    ok: t("common.delete"),
+  });
+  if (!ok) return;
   try {
     await api.deleteEntry(id);
     state.entries = state.entries.filter((e) => e.id !== id);
@@ -1845,6 +1924,8 @@ try {
   },
   paywall: () => openPaywall(),
   reanalyze: () => runAnalysis({ force: true }),
+  "confirm-ok": () => settleConfirm(true),
+  "confirm-cancel": () => settleConfirm(false),
   plan: (node) => setPlan(node.dataset.plan),
   lang: (node) => switchLang(node.dataset.lang),
   theme: () => cycleTheme(),
@@ -1894,6 +1975,31 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  /* 确认卡叠在 sheet 之上时，Esc / Tab 先归它管，
+     否则会直接把底下的编辑浮层关掉。 */
+  if (confirmLayer && !confirmLayer.hidden) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      settleConfirm(false);
+      return;
+    }
+    if (event.key === "Tab") {
+      const items = $$("button", confirmLayer).filter((el) => el.offsetParent !== null);
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+      return;
+    }
+    return;
+  }
+
   if (overlay.hidden) return;
 
   if (event.key === "Escape") {
