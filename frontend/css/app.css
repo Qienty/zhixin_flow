@@ -438,6 +438,8 @@ a { color: var(--moss); }
   background: var(--moss-tint);
   color: var(--moss);
   border: 1px solid color-mix(in srgb, var(--moss) 24%, transparent);
+  white-space: nowrap;
+  flex: none;
 }
 .ai-dot {
   width: 7px;
