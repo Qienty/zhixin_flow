@@ -4,7 +4,11 @@
    这是个本地跑的 demo，改一行 JS 就该立刻生效，不该被 SW 的缓存挡住。
    /api 一律不碰：情绪记录不进缓存，离线时让请求自然失败，前端已经有 toast。 */
 
-const VERSION = "tether-v1";
+const VERSION = "tether-v2";
+
+/* 部署在子路径下时（如 /qienty/），接口是 /qienty/api/… 而不是 /api/…，
+   所以要按 scope 推前缀，否则接口响应会被当成静态资源缓存进壳里。 */
+const SCOPE_PATH = new URL(self.registration.scope).pathname.replace(/\/$/, "");
 
 const SHELL = [
   "./",
@@ -61,6 +65,6 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/api/")) return;
+  if (url.pathname.startsWith(`${SCOPE_PATH}/api/`)) return;
   event.respondWith(networkFirst(request));
 });

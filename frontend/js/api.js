@@ -2,6 +2,18 @@
 
 let lang = "zh";
 
+/* 部署在子路径下（比如 /qienty/）时，接口地址必须跟着页面走。
+   直接从当前页面推：根部署得到 ""，子路径部署得到 "/qienty"。
+   注意页面地址必须带结尾斜杠（/qienty/），否则这里会推成 "/"。 */
+const BASE = (() => {
+  try {
+    const path = new URL(".", location.href).pathname;
+    return path === "/" ? "" : path.replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+})();
+
 export function setApiLang(value) {
   lang = value === "en" ? "en" : "zh";
 }
@@ -15,7 +27,7 @@ function qs(params = {}) {
 }
 
 async function call(path, { method = "GET", body, params } = {}) {
-  const url = `${path}?${qs(params)}`;
+  const url = `${BASE}${path}?${qs(params)}`;
   const init = { method, headers: {} };
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
@@ -62,8 +74,12 @@ export const api = {
   crisis: (region) => call("/api/crisis", { params: { region } }),
   seed: (tzOffset) => call("/api/demo/seed", { method: "POST", params: { tz_offset: tzOffset, reset: 1 } }),
 
-  exportUrl: (format) => `/api/export?${qs({ format })}`,
+  exportUrl: (format) => `${BASE}/api/export?${qs({ format })}`,
 };
+
+export function apiBase() {
+  return BASE;
+}
 
 export function tzOffset() {
   return -new Date().getTimezoneOffset();

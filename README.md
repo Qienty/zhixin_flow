@@ -36,6 +36,29 @@ python backend/server.py 8000
 - `backend/data/tether.db` 首次启动自动创建；要重置就删掉它。
 - **没有登录和鉴权**：谁能访问到这个端口，谁就能读写全部记录。公网部署前请在前面加一层访问控制。
 
+### 挂在子路径下（如 `http://IP/qienty/`）
+
+根路径被别的站点占着时，可以只把本应用挂到一个前缀下。前端接口地址是运行时按页面位置推的，
+所以不需要打包或改配置，只要 Nginx 剥掉前缀转发：
+
+```nginx
+location = /qienty { return 301 /qienty/; }
+
+location /qienty/ {
+    proxy_pass http://127.0.0.1:8000/;   # 结尾的 / 会把 /qienty 前缀去掉
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_http_version 1.1;
+    proxy_read_timeout 120s;             # AI 分析单次要 7—10 秒
+}
+```
+
+两个必须注意的点：
+
+- 访问地址**一定要带结尾斜杠**（`/qienty/`）。`/qienty` 会解析成根目录，静态资源和接口全错位，
+  所以上面第一条把无斜杠的请求 301 过去。
+- 子路径部署时后端仍然只听 `127.0.0.1:8000`，8000 不需要对外放行。
+
 ## 目录
 
 ```
