@@ -139,11 +139,16 @@ class Server(ThreadingHTTPServer):
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8000"))
+    # 默认只听回环：本地跑或面板挂 Nginx 反代时都够用，也不会把记录暴露到公网。
+    # 要在容器里直接对外（前面没有反代），把 HOST 设成 0.0.0.0。
+    host = (os.environ.get("HOST") or "127.0.0.1").strip()
     db.init_db()
-    httpd = Server(("127.0.0.1", port), Handler)
+    httpd = Server((host, port), Handler)
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     print(f"\n  Tether · 情绪记录与自我调节")
-    print(f"  http://127.0.0.1:{port}")
-    print(f"  API  http://127.0.0.1:{port}/api/meta")
+    print(f"  监听 {host}:{port}")
+    print(f"  http://{shown}:{port}")
+    print(f"  API  http://{shown}:{port}/api/meta")
     print("  Ctrl+C 停止\n")
     try:
         httpd.serve_forever()
