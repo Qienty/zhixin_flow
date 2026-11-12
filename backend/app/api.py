@@ -31,7 +31,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import content, db, insights, seed
+from . import ai, content, db, insights, seed
 
 PRICING = {
     "monthly": {"price": "$9", "period": {"zh": "/ 月", "en": "/ month"}},
@@ -267,6 +267,7 @@ def meta(req: Request):
     payload["region"] = db.get_setting("region", "US")
     payload["lang"] = db.get_setting("lang", "zh")
     payload["has_data"] = bool(_rows("SELECT id FROM entries LIMIT 1"))
+    payload["ai"] = ai.public_config()
     return payload
 
 
@@ -444,13 +445,136 @@ def stats_basic(req: Request):
     return payload
 
 
+def _window_entries(days: int) -> list[dict]:
+    since = (db.now_utc() - timedelta(days=days)).isoformat(timespec="seconds")
+    return _rows("SELECT * FROM entries WHERE occurred_at >= ? ORDER BY occurred_at", [since])
+
+
+def _redact(text: str) -> str:
+    """错误详情会下发到前端，先把可能出现的 key 片段抹掉。"""
+    return re.sub(r"sk-[A-Za-z0-9_\-]{4,}", "sk-***", text or "")
+
+
+def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str) -> dict:
+    """这一屏归 AI 还是归规则引擎。
+
+    状态直接决定界面长什么样：
+      pro           免费层没有这项
+      off           没配 key —— 全站静默用规则版
+      insufficient  样本不够，先别硬凑结论
+      pending       有数据但还没分析过，前端接着调 /api/insights/analyze
+      ready         正文已由模型改写（这里已经把文案合并进 rules 了）
+    """
+    cfg = ai.config()
+    info: dict[str, Any] = {"enabled": cfg["enabled"], "model": cfg["model"] if cfg["enabled"] else None}
+
+    if plan != "pro":
+        return {**info, "status": "pro"}
+    if not cfg["enabled"]:
+        return {**info, "status": "off"}
+    if len(entries) < insights.MIN_SAMPLE:
+        return {
+            **info,
+            "status": "insufficient",
+            "needed": insights.MIN_SAMPLE,
+            "have": len(entries),
+        }
+
+    narrative = ai.cache_get(ai.fingerprint(entries, days, lang, cfg["model"]))
+    if narrative is None:
+        return {**info, "status": "pending"}
+
+    ai.merge(rules, narrative)
+    return {
+        **info,
+        "status": "ready",
+        "headline": narrative.get("headline") or "",
+        "summary": narrative.get("summary") or "",
+        "next_step": narrative.get("next_step") or "",
+        "focus": narrative.get("focus") or {},
+    }
+
+
 @router.route("GET", "/api/insights")
 def get_insights(req: Request):
     days = max(1, min(req.qi("days", 14), 3650))
     plan = db.get_setting("plan", "free")
-    since = (db.now_utc() - timedelta(days=days)).isoformat(timespec="seconds")
-    entries = _rows("SELECT * FROM entries WHERE occurred_at >= ? ORDER BY occurred_at", [since])
-    return insights.build_insights(entries, days, req.lang, locked=(plan != "pro"))
+    entries = _window_entries(days)
+    payload = insights.build_insights(entries, days, req.lang, locked=(plan != "pro"))
+    payload["ai"] = _ai_state(entries, days, req.lang, payload, plan)
+    return payload
+
+
+@router.route("POST", "/api/insights/analyze")
+def analyze_insights(req: Request):
+    """让模型重新分析这段时间的记录。
+
+    这是唯一一个会真的阻塞几秒的接口；失败不走 500，而是带着错误状态返回规则版，
+    前端因此永远有内容可显示。
+    """
+    plan = db.get_setting("plan", "free")
+    if plan != "pro":
+        raise ApiError(403, "AI 分析属于 Pro 层")
+
+    cfg = ai.config()
+    if not cfg["enabled"]:
+        raise ApiError(503, "还没有配置 AI key：把 TETHER_AI_API_KEY 写进 .env")
+
+    body = req.json()
+    try:
+        days = int(body.get("days") or 14)
+    except (TypeError, ValueError):
+        days = 14
+    days = max(1, min(days, 3650))
+    force = bool(body.get("force"))
+    lang = req.lang
+
+    entries = _window_entries(days)
+    rules = insights.build_insights(entries, days, lang, locked=False)
+
+    if len(entries) < insights.MIN_SAMPLE:
+        rules["ai"] = {
+            "enabled": True,
+            "model": cfg["model"],
+            "status": "insufficient",
+            "needed": insights.MIN_SAMPLE,
+            "have": len(entries),
+        }
+        return rules
+
+    fingerprint = ai.fingerprint(entries, days, lang, cfg["model"])
+    narrative = None if force else ai.cache_get(fingerprint)
+    from_cache = narrative is not None
+    error = ""
+
+    if narrative is None:
+        try:
+            narrative = ai.analyze(entries, days, lang, rules)
+            ai.cache_put(fingerprint, narrative, cfg["model"])
+        except ai.AIError as exc:
+            error = str(exc)
+
+    if narrative is None:
+        rules["ai"] = {
+            "enabled": True,
+            "model": cfg["model"],
+            "status": "error",
+            "message": _redact(error)[:200],
+        }
+        return rules
+
+    ai.merge(rules, narrative)
+    rules["ai"] = {
+        "enabled": True,
+        "model": cfg["model"],
+        "status": "ready",
+        "headline": narrative.get("headline") or "",
+        "summary": narrative.get("summary") or "",
+        "next_step": narrative.get("next_step") or "",
+        "focus": narrative.get("focus") or {},
+        "cached": from_cache,
+    }
+    return rules
 
 
 # --------------------------------------------------------------------------- #

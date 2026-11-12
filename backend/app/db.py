@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- AI 分析结果缓存：指纹相同（同一批记录 + 同一窗口 + 同一模型）直接复用，
+-- 免得每次翻到总结页都把同样的数据再算一遍。
+CREATE TABLE IF NOT EXISTS ai_cache (
+    key        TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    model      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
 """
 
 DEFAULTS = {

@@ -51,6 +51,9 @@ export const api = {
 
   stats: (days) => call("/api/stats/basic", { params: { days } }),
   insights: (days) => call("/api/insights", { params: { days } }),
+  /* 唯一会阻塞几秒的接口：让模型重写这一屏的结论 */
+  analyzeInsights: (days, force = false) =>
+    call("/api/insights/analyze", { method: "POST", body: { days, force } }),
 
   account: () => call("/api/account"),
   setPlan: (plan) => call("/api/account/subscription", { method: "POST", body: { plan } }),

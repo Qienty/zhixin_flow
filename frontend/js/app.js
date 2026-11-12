@@ -35,6 +35,9 @@ const state = {
   insightsDays: 14,
   insights: null,
   stats: null,
+  /* AI 分析是异步的：进来先显示规则版 + 骨架，模型回来再替换 */
+  aiBusy: false,
+  aiError: "",
 };
 
 /* ------------------------------------------------------------------ 工具 */
@@ -297,10 +300,13 @@ async function loadEntries() {
 function invalidateInsights() {
   state.insights = null;
   state.stats = null;
+  state.aiError = "";
 }
 
 /* 快速来回点 14 / 30 天时，慢的那个响应不该覆盖后点的那个 */
 let insightsSeq = 0;
+/* AI 分析同理：切了窗口或重发请求，旧的那份回来就该丢掉 */
+let aiSeq = 0;
 
 async function loadInsights() {
   const seq = ++insightsSeq;
@@ -309,7 +315,33 @@ async function loadInsights() {
   if (seq !== insightsSeq) return false;
   state.insights = ins;
   state.stats = stats;
+  /* 后端不在这里同步等模型：它只告诉前端「还没分析过」，
+     真正的生成交给 runAnalysis，页面因此能立刻出骨架。 */
+  if (ins.ai && ins.ai.status === "pending") runAnalysis();
   return true;
+}
+
+async function runAnalysis({ force = false } = {}) {
+  if (!state.insights) return;
+  const days = state.insightsDays;
+  const seq = ++aiSeq;
+  state.aiBusy = true;
+  state.aiError = "";
+  if (state.view === "insights") render();
+  try {
+    const payload = await api.analyzeInsights(days, force);
+    if (seq !== aiSeq || days !== state.insightsDays) return;
+    state.insights = payload;
+    if (payload.ai && payload.ai.status === "error") state.aiError = payload.ai.message || "";
+  } catch (err) {
+    if (seq !== aiSeq) return;
+    state.aiError = err.message;
+  } finally {
+    if (seq === aiSeq) {
+      state.aiBusy = false;
+      if (state.view === "insights") render();
+    }
+  }
 }
 
 async function refresh({ entries = true, account = true, insights = false } = {}) {
@@ -706,7 +738,7 @@ function basicBlock(stats) {
   </div>`;
 }
 
-function patternCard(p, sample = false) {
+function patternCard(p, sample = false, focus = false) {
   const color = emotionMeta(p.dominant_emotion).color;
   const where = p.band
     ? getLang() === "zh"
@@ -717,6 +749,7 @@ function patternCard(p, sample = false) {
     <div class="row-between">
       <span class="eyebrow">${esc(where)}</span>
       <span class="row" style="gap:6px">
+        ${focus ? `<span class="tag ai">${t("ai.focus")}</span>` : ""}
         ${sample ? `<span class="tag moss">${t("ins.sample")}</span>` : ""}
         <span class="tag">${p.count}</span>
       </span>
@@ -808,18 +841,102 @@ function lockedBlock(patterns) {
   </div>`;
 }
 
+/* ------------------------------------------------------------- AI 区块 */
+
+function aiHeader(ins) {
+  const ai = ins.ai || {};
+  const canRerun = !state.aiBusy && ai.status === "ready";
+  return `<div class="row-between">
+    <span class="row" style="gap:8px">
+      <span class="ai-dot" aria-hidden="true"></span>
+      <span class="eyebrow">${t("ai.badge")}</span>
+      <span class="tiny">${esc(ai.model || "")}</span>
+    </span>
+    ${canRerun ? `<button class="btn ghost sm" data-act="reanalyze">${t("ai.regenerate")}</button>` : ""}
+  </div>`;
+}
+
+/* AI 只写正文，数字仍在下面的卡片里由代码渲染——所以骨架里也不许出数 */
+function aiCard(ins) {
+  const ai = ins.ai || {};
+  const patterns = ins.patterns || [];
+
+  if (state.aiBusy) {
+    return `<div class="card sheen stack gap-12">
+      <div class="row-between">
+        <span class="eyebrow">${t("ai.summary")}</span>
+        <span class="tag moss">${t("ai.analyzing", { days: state.insightsDays })}</span>
+      </div>
+      <div class="skeleton" style="width:62%;height:22px"></div>
+      <div class="skeleton" style="width:94%"></div>
+      <div class="skeleton" style="width:88%"></div>
+      <div class="skeleton" style="width:76%"></div>
+      <p class="tiny">${t("ai.analyzing_note")}</p>
+    </div>`;
+  }
+
+  if (ai.status === "error") {
+    return `<div class="card flat stack gap-10">
+      <div class="row-between">
+        <span class="eyebrow">${t("ai.badge")}</span>
+        <span class="tag warn">${t("ai.fallback")}</span>
+      </div>
+      <p class="small">${t("ai.failed")}</p>
+      ${state.aiError ? `<p class="tiny" style="word-break:break-word">${esc(state.aiError)}</p>` : ""}
+      <div class="row"><button class="btn ghost sm" data-act="reanalyze">${t("ai.retry")}</button></div>
+    </div>`;
+  }
+
+  /* off / insufficient 直接不出现：宁可少一块，也不给半成品 */
+  if (ai.status !== "ready") return "";
+
+  const focus = ai.focus || {};
+  const focusPattern = patterns.find((p) => p.key === focus.key);
+  const sample = ins.sample || {};
+
+  return `<div class="card sheen stack gap-12">
+    <div class="row-between">
+      <span class="eyebrow">${t("ai.summary")}</span>
+      <span class="tag moss">${t("ai.records", { n: sample.entries || 0 })}</span>
+    </div>
+    ${ai.headline ? `<p class="display sm" style="margin:0">${esc(ai.headline)}</p>` : ""}
+    ${ai.summary ? `<p class="body-lg">${esc(ai.summary)}</p>` : ""}
+    ${
+      focusPattern && focus.why
+        ? `<div class="ai-focus">
+            <span class="tag ai">${t("ai.focus")}</span>
+            <span class="small">${esc(focusPattern.label)} —— ${esc(focus.why)}</span>
+          </div>`
+        : ""
+    }
+    ${
+      ai.next_step
+        ? `<div class="ai-next">
+            <span class="tag moss">${t("ai.next")}</span>
+            <p class="small">${esc(ai.next_step)}</p>
+          </div>`
+        : ""
+    }
+    <p class="tiny">${t("ai.privacy")}</p>
+  </div>`;
+}
+
 function proBlock(ins) {
   const patterns = ins.patterns || [];
   if (!(ins.sample && ins.sample.enough)) return sampleGate(ins.sample);
   if (ins.locked) return lockedBlock(patterns);
 
+  const ai = ins.ai || {};
+  const showAi = !!ai.enabled && ai.status !== "pro";
+  const focusKey = (ai.focus && ai.focus.key) || "";
   const body = patterns.length
-    ? `<div class="stack gap-12">${patterns.map((p) => patternCard(p)).join("")}</div>`
+    ? `<div class="stack gap-12">${patterns.map((p) => patternCard(p, false, p.key === focusKey)).join("")}</div>`
     : `<div class="card flat"><p class="small">${t("ins.no_pattern")}</p></div>`;
   const efficacy = ins.efficacy || [];
   const reminders = ins.reminders || [];
 
   return `<div class="stack gap-16">
+    ${showAi ? `<div class="stack gap-10">${aiHeader(ins)}${aiCard(ins)}</div>` : ""}
     <div class="stack gap-12">${patternsHead()}${body}</div>
     ${ins.peak ? `<div class="card flat"><p class="body-lg">${esc(ins.peak.text)}</p></div>` : ""}
     ${ins.trend ? trendCard(ins.trend) : ""}
@@ -1727,6 +1844,7 @@ try {
     render();
   },
   paywall: () => openPaywall(),
+  reanalyze: () => runAnalysis({ force: true }),
   plan: (node) => setPlan(node.dataset.plan),
   lang: (node) => switchLang(node.dataset.lang),
   theme: () => cycleTheme(),
