@@ -195,8 +195,11 @@ a { color: var(--moss); }
 
 .stack { display: flex; flex-direction: column; }
 .gap-4 { gap: 4px; }
+.gap-6 { gap: 6px; }
 .gap-8 { gap: 8px; }
+.gap-10 { gap: 10px; }
 .gap-12 { gap: 12px; }
+.gap-14 { gap: 14px; }
 .gap-16 { gap: 16px; }
 .gap-24 { gap: 24px; }
 .row { display: flex; align-items: center; gap: 10px; }
@@ -525,17 +528,31 @@ a { color: var(--moss); }
 }
 
 /* 14 天强度走势：前端用已有记录算，不额外请求 */
-.spark { display: flex; align-items: flex-end; gap: 3px; height: 46px; margin-top: 4px; }
-.spark i {
-  flex: 1;
-  min-height: 3px;
-  height: var(--h, 3px);
+/* 每天最高强度：一天一格，有记录才有柱。
+   固定 7px 宽 + 两端对齐，30 天也只是变密，不会糊成一块，也不会压到上面的说明文字。 */
+.spark {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 2px;
+  height: 56px;
+  margin-top: 6px;
+  padding-bottom: 1px;
+}
+.spark-bar,
+.spark-slot {
+  flex: 0 0 auto;
+  width: 7px;
+  border-radius: 3.5px;
+}
+.spark-bar {
+  height: var(--h, 8px);
   background: var(--moss-tint);
-  border-radius: 3px 3px 0 0;
   transition: height 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.spark i.hot { background: var(--hot); }
-.spark i.empty { background: var(--line); opacity: 0.6; }
+.spark-bar.hot { background: var(--hot); }
+/* 没记录的那天：不留任何色块，只有一个看不见的定位点 */
+.spark-slot { height: 0; }
 .spark-axis { display: flex; justify-content: space-between; margin-top: 6px; }
 
 .delta-pill {

@@ -32,7 +32,7 @@ const state = {
   total: 0,
   filter: { emotion: "all", sort: "severity", unfilled: false },
   logLimit: PAGE_SIZE,
-  insightsDays: 14,
+  insightsDays: 30,
   insights: null,
   stats: null,
   /* AI 分析是异步的：进来先显示规则版 + 骨架，模型回来再替换 */
@@ -686,17 +686,27 @@ function sparkline(days) {
   }
   if (!byDay.size) return "";
 
-  const cells = [];
+  /* 一天一格：有记录才画柱，没记录就留空。
+     用固定宽度 + space-between，30 天也不会糊成一片，柱子也不会压到上面的说明。 */
   const today = new Date();
+  const cells = [];
+  let hasData = false;
   for (let i = days - 1; i >= 0; i -= 1) {
     const d = new Date(today.getTime() - i * 864e5);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const sev = byDay.get(key) || 0;
-    const height = sev ? 6 + (sev / 5) * 40 : 3;
+    if (!sev) {
+      cells.push(`<span class="spark-slot" title="${key} · —"></span>`);
+      continue;
+    }
+    hasData = true;
+    const height = 10 + (sev / 5) * 44;
     cells.push(
-      `<i class="${sev >= 4 ? "hot" : sev ? "" : "empty"}" style="--h:${height}px" title="${key} · ${sev || "—"}"></i>`
+      `<span class="spark-bar ${sev >= 4 ? "hot" : ""}" style="--h:${height}px" title="${key} · ${sev}"></span>`
     );
   }
+  if (!hasData) return "";
+
   const start = new Date(today.getTime() - (days - 1) * 864e5);
   return `<div class="card stack gap-8">
     <div class="row-between">
