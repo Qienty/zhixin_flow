@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS entries (
 
 CREATE INDEX IF NOT EXISTS idx_entries_occurred ON entries(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_entries_severity ON entries(severity);
-CREATE INDEX IF NOT EXISTS idx_entries_user ON entries(user_id);
+/* user_id 的索引不写在这里：老库还没有这一列时，
+   这句会先于补列执行并直接报错。索引统一在 _migrate() 里补。 */
 
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
