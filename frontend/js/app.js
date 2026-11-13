@@ -539,6 +539,8 @@ function viewNow() {
       <div class="emo-secondary">${secondary.map((e) => emotionTile(e, false)).join("")}</div>
     </div>
 
+    ${wheelCard()}
+
     ${
       empty
         ? `<div class="empty stack gap-12" style="align-items:center">
@@ -1932,6 +1934,12 @@ try {
     render();
   },
   paywall: () => openRedeem(),
+  wheel: () => openWheel(),
+  "wheel-spin": () => spinWheel(),
+  "wheel-edit": () => openWheelEdit(),
+  "wheel-add": () => wheelAddRow(),
+  "wheel-del": (node) => wheelRemoveRow(Number(node.dataset.i)),
+  "wheel-save": () => saveWheel(),
   "redeem-submit": () => doRedeem(),
   "auth-mode": (node) => renderAuth(node.dataset.mode),
   logout: () => doLogout(),
@@ -2056,6 +2064,242 @@ document.addEventListener("keydown", (event) => {
     }
   }
 });
+
+/* ------------------------------------------------------------ 缓解转盘 */
+
+/* 情绪上来时最难的不是「做什么」，是「选哪个」。
+   转盘把这步交出去：清单是用户自己定的，随机由转盘负责。 */
+
+const wheel = { items: [], angle: 0, spinning: false, editing: [] };
+
+async function loadWheel() {
+  try {
+    const res = await api.wheel();
+    wheel.items = res.items || [];
+  } catch {
+    wheel.items = [];
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/* 每格一个色相，低饱和：整圈看起来是一体的，不是六块拼贴 */
+function wheelColor(index, total) {
+  const hue = Math.round((index * 360) / Math.max(total, 3));
+  const light = theme.resolved === "dark" ? 28 : 84;
+  return `hsl(${hue} 34% ${light}%)`;
+}
+
+function polar(deg, radius, cx = 160, cy = 160) {
+  const rad = ((deg - 90) * Math.PI) / 180;
+  return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)];
+}
+
+function rotorMarkup() {
+  const items = wheel.items;
+  const n = Math.max(items.length, 1);
+  const step = 360 / n;
+  const radius = 150;
+  const parts = [];
+
+  for (let i = 0; i < n; i += 1) {
+    const a0 = i * step;
+    const a1 = a0 + step;
+    const [x0, y0] = polar(a0, radius);
+    const [x1, y1] = polar(a1, radius);
+    const large = step > 180 ? 1 : 0;
+    parts.push(
+      `<path d="M160 160 L${x0.toFixed(2)} ${y0.toFixed(2)} A${radius} ${radius} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)} Z"
+             fill="${wheelColor(i, n)}" stroke="var(--paper)" stroke-width="1.5"/>`
+    );
+
+    const mid = a0 + step / 2;
+    const flip = mid > 90 && mid < 270 ? 180 : 0; // 左半边翻过来，避免倒着读
+    const [tx, ty] = polar(mid, radius * 0.63);
+    const raw = (items[i] && items[i].label) || "";
+    const label = raw.length > 9 ? `${raw.slice(0, 9)}…` : raw;
+    parts.push(
+      `<text x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" fill="var(--ink)" font-size="11.5" font-weight="600"
+             text-anchor="middle" dominant-baseline="middle"
+             transform="rotate(${(mid + 90 + flip).toFixed(1)} ${tx.toFixed(1)} ${ty.toFixed(1)})">${esc(label)}</text>`
+    );
+  }
+
+  return `<g class="wheel-rotor" style="transform:rotate(${wheel.angle}deg)">${parts.join("")}</g>`;
+}
+
+function wheelPlaceholder(text) {
+  return `<p class="wheel-idle">${text}</p>`;
+}
+
+async function openWheel() {
+  if (!wheel.items.length) await loadWheel();
+  if (!wheel.items.length) {
+    toast(t("common.error"));
+    return;
+  }
+  wheel.spinning = false;
+  openOverlay(
+    `<div class="sheet center wheel-sheet">
+      <div class="row-between" style="margin-bottom:2px">
+        <span class="eyebrow">${t("wheel.title")}</span>
+        <div class="row gap-8">
+          <button class="chip" data-act="wheel-edit">${t("wheel.edit")}</button>
+          ${sheetClose()}
+        </div>
+      </div>
+      <p class="small" style="text-align:center;margin:6px 0 16px">${t("wheel.lede")}</p>
+
+      <div class="wheel-stage">
+        <span class="wheel-pointer" aria-hidden="true"></span>
+        <svg class="wheel" viewBox="0 0 320 320" role="img" aria-label="${t("wheel.title")}">
+          <circle cx="160" cy="160" r="155" fill="var(--paper)"/>
+          ${rotorMarkup()}
+          <circle cx="160" cy="160" r="36" fill="var(--paper)" stroke="var(--line)"/>
+          <circle cx="160" cy="160" r="6" fill="var(--moss)" opacity="0.5"/>
+        </svg>
+      </div>
+
+      <div class="wheel-result" data-wheel-result>${wheelPlaceholder(t("wheel.idle"))}</div>
+      <button class="btn block" data-act="wheel-spin" data-autofocus>${t("wheel.spin")}</button>
+    </div>`,
+    { label: t("wheel.title") }
+  );
+}
+
+async function spinWheel() {
+  if (wheel.spinning || !wheel.items.length) return;
+  wheel.spinning = true;
+
+  const result = overlay.querySelector("[data-wheel-result]");
+  const button = overlay.querySelector(".wheel-sheet .btn.block");
+  if (button) button.disabled = true;
+  if (result) result.innerHTML = wheelPlaceholder(t("wheel.spinning"));
+
+  const n = wheel.items.length;
+  const step = 360 / n;
+  const index = Math.floor(Math.random() * n);
+  const center = index * step + step / 2;
+  const current = wheel.angle;
+  // 至少转 5 圈，最后让中奖格的中心停在正上方
+  const delta = ((360 - center) - (current % 360) + 360) % 360;
+  wheel.angle = current + 360 * 5 + delta;
+
+  const rotor = overlay.querySelector(".wheel-rotor");
+  if (rotor) rotor.style.transform = `rotate(${wheel.angle}deg)`;
+
+  await sleep(4200);
+  wheel.spinning = false;
+
+  const label = wheel.items[index].label;
+  if (result) {
+    result.innerHTML = `<div class="wheel-pick-card">
+      <span class="eyebrow">${t("wheel.result")}</span>
+      <p class="wheel-pick">${esc(label)}</p>
+      <button class="btn ghost sm" data-act="wheel-spin">${t("wheel.again")}</button>
+    </div>`;
+  }
+  if (button) button.disabled = false;
+}
+
+function syncWheelInputs() {
+  overlay.querySelectorAll("[data-wheel-input]").forEach((input) => {
+    wheel.editing[Number(input.dataset.wheelInput)] = input.value;
+  });
+}
+
+function openWheelEdit() {
+  wheel.editing = wheel.items.map((item) => item.label);
+  renderWheelEdit();
+}
+
+function renderWheelEdit() {
+  openOverlay(
+    `<div class="sheet center">
+      <div class="row-between" style="margin-bottom:6px">
+        <span class="eyebrow">${t("wheel.edit_title")}</span>
+        ${sheetClose()}
+      </div>
+      <p class="small" style="margin-bottom:14px">${t("wheel.edit_lede")}</p>
+
+      <div class="stack gap-8" data-wheel-rows>
+        ${wheel.editing
+          .map(
+            (label, index) => `<div class="wheel-row">
+              <input type="text" data-wheel-input="${index}" value="${esc(label)}"
+                     maxlength="24" placeholder="${t("wheel.placeholder")}" />
+              <button class="wheel-del" data-act="wheel-del" data-i="${index}" aria-label="${t("common.delete")}">×</button>
+            </div>`
+          )
+          .join("")}
+      </div>
+
+      <button class="btn ghost block" style="margin-top:12px" data-act="wheel-add">+ ${t("wheel.add")}</button>
+      <button class="btn block" style="margin-top:8px" data-act="wheel-save">${t("wheel.save")}</button>
+      <p class="tiny" style="text-align:center;margin-top:10px">${t("wheel.limit")}</p>
+    </div>`,
+    { label: t("wheel.edit_title") }
+  );
+  const inputs = overlay.querySelectorAll("[data-wheel-input]");
+  if (inputs.length) inputs[inputs.length - 1].focus({ preventScroll: true });
+}
+
+function wheelAddRow() {
+  syncWheelInputs();
+  if (wheel.editing.length >= 12) {
+    toast(t("wheel.limit"));
+    return;
+  }
+  wheel.editing.push("");
+  renderWheelEdit();
+}
+
+function wheelRemoveRow(index) {
+  syncWheelInputs();
+  if (wheel.editing.length <= 2) {
+    toast(t("wheel.limit"));
+    return;
+  }
+  wheel.editing.splice(index, 1);
+  renderWheelEdit();
+}
+
+async function saveWheel() {
+  syncWheelInputs();
+  const labels = wheel.editing.map((label) => (label || "").trim()).filter(Boolean);
+  if (labels.length < 2) {
+    toast(t("wheel.limit"));
+    return;
+  }
+  try {
+    const res = await api.saveWheel(labels);
+    wheel.items = res.items || [];
+    wheel.angle = 0;
+    toast(t("wheel.saved"));
+    openWheel();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+/* 首页入口卡：一个小小的转盘图形 + 一句话，不说「小游戏」 */
+function wheelCard() {
+  const slices = [0, 60, 120, 180, 240, 300]
+    .map((deg, i) => `hsl(${deg} 34% ${theme.resolved === "dark" ? 30 : 82}%) ${deg}deg ${deg + 60}deg`)
+    .join(", ");
+  return `<button class="wheel-entry" data-act="wheel">
+    <span class="wheel-entry-mark" style="background:conic-gradient(${slices})" aria-hidden="true"></span>
+    <span class="wheel-entry-text">
+      <span class="label">${t("wheel.card_title")}</span>
+      <span class="sub">${t("wheel.card_sub")}</span>
+    </span>
+    <span class="wheel-entry-arrow" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </span>
+  </button>`;
+}
 
 /* --------------------------------------------------------------- 登录门 */
 

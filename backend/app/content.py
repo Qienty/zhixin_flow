@@ -569,3 +569,28 @@ def meta_payload(lang: str) -> dict:
         "regions": [{"key": k, "label": CRISIS[k]["label"].get(lang) or CRISIS[k]["label"]["zh"]} for k in REGION_KEYS],
         "disclaimer": DISCLAIMER.get(lang) or DISCLAIMER["zh"],
     }
+
+
+# --------------------------------------------------------------------------- #
+# 缓解转盘
+# --------------------------------------------------------------------------- #
+
+# 不知道能做什么的时候，转盘负责替你做决定。
+# 默认给的都是「五分钟内能做完、不需要意志力」的小动作 —— 情绪上来时做不了大事。
+WHEEL_DEFAULTS = {
+    "zh": ["听一首歌", "走五分钟", "喝口水", "洗把脸", "深呼吸三次", "给朋友发条消息"],
+    "en": [
+        "Listen to one song",
+        "Walk for five minutes",
+        "Drink some water",
+        "Wash your face",
+        "Three slow breaths",
+        "Text a friend",
+    ],
+}
+
+WHEEL_LIMITS = {"min": 2, "max": 12, "label": 24}
+
+
+def wheel_defaults(lang: str) -> list[str]:
+    return list(WHEEL_DEFAULTS.get(lang) or WHEEL_DEFAULTS["zh"])

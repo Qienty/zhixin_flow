@@ -86,6 +86,16 @@ CREATE TABLE IF NOT EXISTS redemptions (
     redeemed_at TEXT NOT NULL,
     UNIQUE(code, user_id)
 );
+
+-- 缓解转盘的清单：用户自己填「能做点什么」，转盘从里面随机挑一件
+CREATE TABLE IF NOT EXISTS wheel_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    label      TEXT NOT NULL,
+    sort       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wheel_user ON wheel_items(user_id);
 """
 
 DEFAULTS = {

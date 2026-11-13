@@ -89,6 +89,9 @@ export const api = {
   crisis: (region) => call("/api/crisis", { params: { region } }),
   seed: (tzOffset) => call("/api/demo/seed", { method: "POST", params: { tz_offset: tzOffset, reset: 1 } }),
 
+  wheel: () => call("/api/wheel"),
+  saveWheel: (items) => call("/api/wheel", { method: "PUT", body: { items } }),
+
   exportUrl: (format) => `${BASE}/api/export?${qs({ format })}`,
 };
 

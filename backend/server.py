@@ -44,6 +44,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:
         self._handle("PATCH")
 
+    def do_PUT(self) -> None:
+        self._handle("PUT")
+
     def do_DELETE(self) -> None:
         self._handle("DELETE")
 
@@ -114,7 +117,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin and urllib.parse.urlsplit(origin).hostname in ("127.0.0.1", "localhost", "::1"):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _send(self, status: int, data: bytes, ctype: str, headers: dict[str, str] | None = None) -> None:
