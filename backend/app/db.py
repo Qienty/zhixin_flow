@@ -12,6 +12,7 @@ DB_PATH = DATA_DIR / "tether.db"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                INTEGER NOT NULL DEFAULT 0,
     emotion                TEXT    NOT NULL,
     severity               INTEGER,
     cause                  TEXT    NOT NULL DEFAULT '',
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS entries (
 
 CREATE INDEX IF NOT EXISTS idx_entries_occurred ON entries(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_entries_severity ON entries(severity);
+CREATE INDEX IF NOT EXISTS idx_entries_user ON entries(user_id);
 
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -44,11 +46,50 @@ CREATE TABLE IF NOT EXISTS ai_cache (
     model      TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+
+-- 账号。plan / region / lang 都挂在用户身上，记录按 user_id 隔离。
+CREATE TABLE IF NOT EXISTS users (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    username   TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    pass_hash  TEXT NOT NULL,
+    pass_salt  TEXT NOT NULL,
+    plan       TEXT NOT NULL DEFAULT 'free',
+    region     TEXT NOT NULL DEFAULT 'CN',
+    lang       TEXT NOT NULL DEFAULT 'zh',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- 兑换码：Pro 只靠码开通，不做支付
+CREATE TABLE IF NOT EXISTS redeem_codes (
+    code       TEXT PRIMARY KEY,
+    plan       TEXT NOT NULL DEFAULT 'pro',
+    max_uses   INTEGER NOT NULL DEFAULT 1,
+    used       INTEGER NOT NULL DEFAULT 0,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS redemptions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT NOT NULL,
+    user_id     INTEGER NOT NULL,
+    redeemed_at TEXT NOT NULL,
+    UNIQUE(code, user_id)
+);
 """
 
 DEFAULTS = {
     "plan": "free",
-    "region": "US",
+    "region": "CN",
     "lang": "zh",
     "installed_at": "",
 }
@@ -75,6 +116,7 @@ def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         for key, value in DEFAULTS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
@@ -83,6 +125,17 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """老库补列。单机版升到多账号时，历史记录落在 user_id=0，对新账号不可见。"""
+    if "user_id" not in _columns(conn, "entries"):
+        conn.execute("ALTER TABLE entries ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_user ON entries(user_id)")
 
 
 def get_setting(key: str, default: str = "") -> str:

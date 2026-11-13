@@ -13,6 +13,15 @@ EMOTIONS = [
         "key": "anger",
         "zh": {"label": "愤怒", "hint": "心跳快、肌肉紧"},
         "en": {"label": "Angry", "hint": "hot, tight, fast"},
+        # 记下之后系统先说的那一句。愤怒先降唤醒，所以指向「听息」。
+        "say": {
+            "zh": "先听息。三口气之后再说话。",
+            "en": "Listen to your breath first. Three breaths before you speak.",
+        },
+        "say_note": {
+            "zh": "把注意力放到鼻子下面，听自己呼气的声音，不用数得准。",
+            "en": "Put your attention under your nose and listen to your own exhale. No need to count right.",
+        },
         "color": "#B4523F",
         "branch": "anger",
     },
@@ -20,6 +29,14 @@ EMOTIONS = [
         "key": "sadness",
         "zh": {"label": "伤心", "hint": "想缩起来"},
         "en": {"label": "Sad", "hint": "small, withdrawn"},
+        "say": {
+            "zh": "不用解释。手放这儿，待一会儿。",
+            "en": "No need to explain. Hand here. Stay a while.",
+        },
+        "say_note": {
+            "zh": "伤心不需要被说服，也不需要马上好起来。先有人陪着就够了。",
+            "en": "Sadness doesn't need convincing, or fixing on the spot. Company is enough to start.",
+        },
         "color": "#4E6E96",
         "branch": "sadness",
     },
@@ -27,6 +44,14 @@ EMOTIONS = [
         "key": "despair",
         "zh": {"label": "绝望", "hint": "没有出路感"},
         "en": {"label": "Hopeless", "hint": "no way out"},
+        "say": {
+            "zh": "先别一个人扛。这些电话现在就能打。",
+            "en": "Don't carry this alone. These lines are open right now.",
+        },
+        "say_note": {
+            "zh": "绝望不问「怎么办」，它先要有人接住。打过去不用组织语言。",
+            "en": "Hopelessness isn't asking for a plan. It needs someone to catch you. You don't need the right words.",
+        },
         "color": "#5B5878",
         "branch": "despair",
     },
@@ -34,6 +59,14 @@ EMOTIONS = [
         "key": "anxiety",
         "zh": {"label": "焦虑", "hint": "停不下来地想"},
         "en": {"label": "Anxious", "hint": "can't stop thinking"},
+        "say": {
+            "zh": "把这口气呼完。剩下的先不管。",
+            "en": "Finish this one exhale. The rest can wait.",
+        },
+        "say_note": {
+            "zh": "焦虑在往前跑，先把它拉回到身体上：呼气比吸气长就好。",
+            "en": "Anxiety runs ahead. Pull it back into the body: exhale longer than you inhale.",
+        },
         "color": "#C08A3E",
         "branch": "anxiety",
     },
@@ -41,6 +74,14 @@ EMOTIONS = [
         "key": "drained",
         "zh": {"label": "疲惫", "hint": "空了、没电"},
         "en": {"label": "Drained", "hint": "empty, flat"},
+        "say": {
+            "zh": "今天只做一件事。先把这一笔记下来。",
+            "en": "One thing today. Start by noting this one.",
+        },
+        "say_note": {
+            "zh": "疲惫不是懒。它只是告诉你额度用完了，今天不需要再证明什么。",
+            "en": "Drained isn't lazy. It means the budget is spent — nothing left to prove today.",
+        },
         "color": "#6E7A6B",
         "branch": "none",
     },
@@ -48,6 +89,14 @@ EMOTIONS = [
         "key": "calm",
         "zh": {"label": "平静", "hint": "还行"},
         "en": {"label": "Calm", "hint": "okay, settled"},
+        "say": {
+            "zh": "那就这样待着。什么都不用做。",
+            "en": "Stay as you are. Nothing to do.",
+        },
+        "say_note": {
+            "zh": "平静也算一条记录。它让你以后知道，日子不全是难的那几天。",
+            "en": "Calm counts as an entry too. It reminds you later that not every day was a hard one.",
+        },
         "color": "#4F7A66",
         "branch": "none",
     },
@@ -55,6 +104,14 @@ EMOTIONS = [
         "key": "good",
         "zh": {"label": "挺好", "hint": "想说一声"},
         "en": {"label": "Good", "hint": "worth noting"},
+        "say": {
+            "zh": "愿你多遇到这样的时刻。记下来。",
+            "en": "May more of these find you. Note it down.",
+        },
+        "say_note": {
+            "zh": "好时刻也值得留一笔。以后难的时候翻到它，比任何道理都有用。",
+            "en": "Good moments are worth keeping too. On a hard day, finding this beats any advice.",
+        },
         "color": "#C9971F",
         "branch": "none",
     },
@@ -327,6 +384,32 @@ BRANCH_HINT = {
 }
 
 CRISIS = {
+    "CN": {
+        "label": {"zh": "中国大陆", "en": "China mainland"},
+        "emergency": {"zh": "110（报警）/ 120（急救）", "en": "110 (police) / 120 (ambulance)"},
+        "lines": [
+            {
+                # 国家卫健委 2024 年 12 月发文设置，2025 年 5 月起全国接通
+                "name": "全国心理援助热线",
+                "contact": {"zh": "12356 · 24 小时 · 免费", "en": "12356 · 24h · free"},
+                "number": "12356",
+            },
+            {
+                "name": "北京心理危机研究与干预中心",
+                "contact": {
+                    "zh": "手机 010-82951332 · 座机 800-810-1117 · 24 小时",
+                    "en": "mobile 010-82951332 · landline 800-810-1117 · 24h",
+                },
+                "number": "01082951332",
+                "url": "https://www.crisis.org.cn",
+            },
+            {
+                "name": "青少年服务台",
+                "contact": {"zh": "12355", "en": "12355"},
+                "number": "12355",
+            },
+        ],
+    },
     "US": {
         "label": {"zh": "美国", "en": "United States"},
         "emergency": {"zh": "911", "en": "911"},
@@ -425,9 +508,14 @@ def intervention_for(emotion: str, lang: str) -> dict:
     branch = meta["branch"]
     body = INTERVENTIONS.get(branch, INTERVENTIONS["none"])
     payload = body.get(lang) or body["zh"]
+    say = meta.get("say") or {}
+    note = meta.get("say_note") or {}
     return {
         "emotion": meta["key"],
         "branch": branch,
+        # 记下之后系统先说的那一句，浮层第一屏
+        "say": say.get(lang) or say.get("zh") or "",
+        "say_note": note.get(lang) or note.get("zh") or "",
         "branch_hint": BRANCH_HINT.get(branch, BRANCH_HINT["none"]).get(lang, ""),
         "relief_prompt": (HELPFUL_PROMPTS.get(lang) or HELPFUL_PROMPTS["zh"])[0],
         **payload,
@@ -462,11 +550,15 @@ def crisis_for(region: str, lang: str) -> dict:
 def meta_payload(lang: str) -> dict:
     emotions = []
     for e in EMOTIONS:
+        say = e.get("say") or {}
+        note = e.get("say_note") or {}
         emotions.append(
             {
                 "key": e["key"],
                 "label": e["zh"]["label"] if lang == "zh" else e["en"]["label"],
                 "hint": e["zh"]["hint"] if lang == "zh" else e["en"]["hint"],
+                "say": say.get(lang) or say.get("zh") or "",
+                "say_note": note.get(lang) or note.get("zh") or "",
                 "color": e["color"],
                 "branch": e["branch"],
             }

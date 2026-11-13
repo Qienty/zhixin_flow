@@ -42,8 +42,14 @@ async function call(path, { method = "GET", body, params } = {}) {
     data = null;
   }
   if (!res.ok) {
+    /* 会话过期或被踢掉：让上层统一回到登录页，而不是每个调用点各弹一次 toast */
+    if (res.status === 401 && !path.startsWith("/api/auth/")) {
+      window.dispatchEvent(new CustomEvent("tether:unauthorized"));
+    }
     const message = (data && (data.error || data.detail)) || `HTTP ${res.status}`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = res.status;
+    throw error;
   }
   return data;
 }
@@ -68,8 +74,17 @@ export const api = {
     call("/api/insights/analyze", { method: "POST", body: { days, force } }),
 
   account: () => call("/api/account"),
-  setPlan: (plan) => call("/api/account/subscription", { method: "POST", body: { plan } }),
+  redeem: (code) => call("/api/account/redeem", { method: "POST", body: { code } }),
   setSettings: (payload) => call("/api/account/settings", { method: "PATCH", body: payload }),
+
+  me: () => call("/api/auth/me"),
+  login: (username, password) =>
+    call("/api/auth/login", { method: "POST", body: { username, password } }),
+  register: (username, password) =>
+    call("/api/auth/register", { method: "POST", body: { username, password } }),
+  logout: () => call("/api/auth/logout", { method: "POST" }),
+  changePassword: (old_password, new_password) =>
+    call("/api/auth/password", { method: "POST", body: { old_password, new_password } }),
 
   crisis: (region) => call("/api/crisis", { params: { region } }),
   seed: (tzOffset) => call("/api/demo/seed", { method: "POST", params: { tz_offset: tzOffset, reset: 1 } }),

@@ -215,6 +215,14 @@ function announce(text) {
 /* ---------------------------------------------------------------- 主题 */
 
 const theme = { pref: "auto", resolved: "light" };
+
+/* 语音识别语言。中/英/俄三档，和界面语言解耦：俄语用户可以用俄语说话。 */
+const VOICE_LANGS = [
+  { key: "zh-CN", label: "中文" },
+  { key: "en-US", label: "EN" },
+  { key: "ru-RU", label: "Рус" },
+];
+const voice = { lang: "" };
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
 const THEME_ICON = {
@@ -976,10 +984,24 @@ function viewInsights() {
 /* ---------------------------------------------------------------- 我的 */
 
 function viewMe() {
-  const acc = state.account || { pro: false, entries: 0 };
+  const acc = state.account || { pro: false, entries: 0, user: {} };
   const regions = (state.meta && state.meta.regions) || [];
+  const username = (acc.user && acc.user.username) || "";
   return `<div class="stack gap-16">
     <h1 class="display sm">${t("me.title")}</h1>
+
+    <div class="card stack gap-8">
+      <span class="eyebrow">${t("me.account")}</span>
+      <div class="list-row">
+        <div><div class="label">${esc(username)}</div></div>
+      </div>
+      <button class="list-row" data-act="change-password">
+        <div><div class="label">${t("me.change_password")}</div></div>
+      </button>
+      <button class="list-row" data-act="logout">
+        <div><div class="label" style="color:var(--brick)">${t("auth.logout")}</div></div>
+      </button>
+    </div>
 
     <div class="plan-card stack gap-12">
       <div class="row-between">
@@ -987,11 +1009,7 @@ function viewMe() {
         ${acc.pro ? `<span class="lock-badge">PRO</span>` : ""}
       </div>
       <p class="body-lg">${acc.pro ? t("me.plan_pro_body") : t("me.plan_free_body")}</p>
-      ${
-        acc.pro
-          ? `<button class="btn ghost sm" data-act="plan" data-plan="free">${t("me.downgrade")}</button>`
-          : `<button class="btn block" data-act="paywall">${t("me.upgrade")}</button>`
-      }
+      ${acc.pro ? "" : `<button class="btn block" data-act="paywall">${t("me.redeem")}</button>`}
     </div>
 
     <div class="card stack gap-8">
@@ -1012,6 +1030,16 @@ function viewMe() {
 `<button class="chip ${theme.pref === key ? "on" : ""}" data-act="set-theme" data-theme="${key}">${t(`theme.${key}`)}</button>`
 )
 .join("")}
+        </div>
+      </div>
+      <div class="list-row">
+        <div><div class="label">${t("me.voice")}</div></div>
+        <div class="chip-row">
+          ${VOICE_LANGS.map(
+            (v) =>
+              `<button class="chip ${(voice.lang || (getLang() === "zh" ? "zh-CN" : "en-US")) === v.key ? "on" : ""}"
+                data-act="set-voice" data-lang="${v.key}">${v.label}</button>`
+          ).join("")}
         </div>
       </div>
       <div class="list-row">
@@ -1215,7 +1243,7 @@ async function pickEmotion(emotionKey, node) {
     invalidateInsights();
     iv.entryId = res.entry.id;
     iv.data = res.intervention;
-    iv.step = 0;
+    iv.step = -1; // -1 = 先说那一句话，再进步骤
     iv.relief = null;
     iv.crisis = null;
     renderStep();
@@ -1223,7 +1251,7 @@ async function pickEmotion(emotionKey, node) {
     if (res.intervention.branch === "despair") {
       // 危机资源异步补进来，但脚本第一步不等它
       try {
-        iv.crisis = await api.crisis((state.account && state.account.region) || "US");
+        iv.crisis = await api.crisis((state.account && state.account.region) || "CN");
         const slot = overlay.querySelector("[data-crisis]");
         if (slot) slot.innerHTML = crisisBlock();
       } catch {
@@ -1249,10 +1277,41 @@ function stepDots(current, total) {
     .join("")}</div>`;
 }
 
+/* 记下情绪之后的第一屏：只有一句话。
+
+   这一步是为了「不管什么情绪，都先被回应一次」——愤怒给听息，挺好给祝福。
+   不给表单、不给建议列表，就一句。想继续再点「开始」进 30 秒引导。 */
+function renderSay() {
+  const data = iv.data;
+  const meta = emotionMeta(data.emotion);
+  const tint = rgba(meta.color, 0.22);
+  openOverlay(`<div class="focus say">
+    <div class="focus-head">
+      <span class="eyebrow" style="color:${meta.color}">${esc(meta.label)}</span>
+      <button class="chip" data-act="iv-skip">${t("iv.skip")}</button>
+    </div>
+    <div class="focus-body">
+      <div class="say-mark" style="--tint:${tint}"></div>
+      <h2 class="focus-title say-title">${esc(data.say)}</h2>
+      ${data.say_note ? `<p class="focus-text">${esc(data.say_note)}</p>` : ""}
+      ${data.branch === "despair" ? `<div data-crisis>${crisisBlock()}</div>` : ""}
+    </div>
+    <div class="focus-foot stack gap-12">
+      <button class="btn block" data-act="iv-next" data-autofocus>${t("iv.say_next")}</button>
+      <p class="focus-hint">${t("iv.key_hint")}</p>
+    </div>
+  </div>`, { label: `${meta.label} · ${data.say}` });
+}
+
 function renderStep() {
   const data = iv.data;
   const steps = data.steps || [];
   iv.token += 1;
+
+  if (iv.step < 0) {
+    renderSay();
+    return;
+  }
 
   if (iv.step >= steps.length) {
     renderClosing();
@@ -1650,57 +1709,6 @@ async function openCrisis() {
 
 /* --------------------------------------------------------------- 付费墙 */
 
-function openPaywall() {
-  const pricing = (state.meta && state.meta.pricing) || {};
-  const period = (p) => (p && p.period ? p.period[getLang()] : "");
-  const yearly = pricing.yearly || { price: "$59" };
-  const monthly = pricing.monthly || { price: "$9" };
-
-  openOverlay(`<div class="sheet center">
-    <div class="row-between" style="margin-bottom:6px">
-      <span class="eyebrow">Tether Pro</span>
-      ${sheetClose()}
-    </div>
-    <h2 class="display" style="margin-bottom:8px">${t("pay.title")}</h2>
-    <p class="body-lg" style="margin-bottom:18px">${t("pay.lede")}</p>
-
-    <div class="card stack gap-12" style="margin-bottom:12px">
-      ${[t("pay.f1"), t("pay.f2"), t("pay.f3")]
-        .map(
-          (line) => `<div class="row gap-8" style="align-items:flex-start">
-            <span style="color:var(--moss);font-weight:700" aria-hidden="true">✓</span>
-            <span class="small" style="color:var(--ink-2)">${line}</span>
-          </div>`
-        )
-        .join("")}
-    </div>
-
-    <div class="stack gap-8" style="margin-bottom:16px">
-      <div class="card flat row-between" style="padding:14px 16px">
-        <div class="stack" style="gap:2px">
-          <span class="small" style="color:var(--ink)">${t("pay.yearly")}</span>
-          <span class="tag moss">${t("pay.best")} · ${yearly.note ? yearly.note[getLang()] : ""}</span>
-        </div>
-        <div class="stack" style="text-align:right;gap:2px">
-          <span class="display sm" style="margin:0">${yearly.price}</span>
-          <span class="tiny">${period(yearly)}</span>
-        </div>
-      </div>
-      <div class="card flat row-between" style="padding:14px 16px">
-        <span class="small" style="color:var(--ink)">${t("pay.monthly")}</span>
-        <div class="stack" style="text-align:right;gap:2px">
-          <span class="display sm" style="margin:0">${monthly.price}</span>
-          <span class="tiny">${period(monthly)}</span>
-        </div>
-      </div>
-    </div>
-
-    <button class="btn block" data-act="plan" data-plan="pro" data-autofocus>${t("pay.cta")}</button>
-    <p class="tiny" style="text-align:center;margin:10px 0 14px">${t("pay.demo_note")}</p>
-    <p class="small">${t("pay.free_note")}</p>
-    <button class="btn ghost block" style="margin-top:12px" data-act="close">${t("pay.continue")}</button>
-  </div>`, { label: t("pay.title") });
-}
 
 /* --------------------------------------------------------------- 语音 */
 
@@ -1730,7 +1738,9 @@ function startVoice() {
     recognition.interimResults = false;
     recognition.continuous = false;
   }
-  recognition.lang = getLang() === "zh" ? "zh-CN" : "en-US"; // 切语言后必须跟着换
+  /* 识别语言单独一项：界面上没俄语，但俄语用户仍可以用俄语说话。
+     没手动选过就跟着界面语言走。 */
+  recognition.lang = voice.lang || (getLang() === "zh" ? "zh-CN" : "en-US");
   recognition.onresult = (event) => {
     const said = Array.from(event.results)
       .map((r) => r[0].transcript)
@@ -1810,17 +1820,6 @@ async function switchLang(lang) {
   render();
 }
 
-async function setPlan(plan) {
-  try {
-    await api.setPlan(plan);
-    closeOverlay();
-    await refresh({ account: true, insights: state.insights !== null });
-    render();
-    toast(plan === "pro" ? t("pay.done") : t("me.plan_free"));
-  } catch (err) {
-    toast(err.message);
-  }
-}
 
 async function removeEntry(id) {
   const ok = await askConfirm({
@@ -1922,12 +1921,25 @@ try {
     }
     render();
   },
-  paywall: () => openPaywall(),
+  paywall: () => openRedeem(),
+  "redeem-submit": () => doRedeem(),
+  "auth-mode": (node) => renderAuth(node.dataset.mode),
+  logout: () => doLogout(),
+  "change-password": () => openPasswordSheet(),
+  "password-submit": () => doChangePassword(),
   reanalyze: () => runAnalysis({ force: true }),
   "confirm-ok": () => settleConfirm(true),
   "confirm-cancel": () => settleConfirm(false),
-  plan: (node) => setPlan(node.dataset.plan),
   lang: (node) => switchLang(node.dataset.lang),
+  "set-voice": (node) => {
+    voice.lang = node.dataset.lang;
+    try {
+      localStorage.setItem("tether.voice", voice.lang);
+    } catch {
+      /* 无痕模式 */
+    }
+    render();
+  },
   theme: () => cycleTheme(),
   "set-theme": (node) => {
     theme.pref = node.dataset.theme;
@@ -2035,6 +2047,153 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+/* --------------------------------------------------------------- 登录门 */
+
+/* 没登录就只给这一屏：不渲染 tab、不拉记录。
+   登录成功后整页重载一次，让所有状态从干净的地方开始。 */
+function renderAuth(mode = "login") {
+  const isLogin = mode === "login";
+  document.body.classList.add("gated");
+  const view = $("#view");
+  if (!view) return;
+  view.innerHTML = `<div class="auth-wrap stack gap-16">
+    <div class="stack gap-6" style="text-align:center">
+      <h1 class="display sm" style="margin:0">${isLogin ? t("auth.login_title") : t("auth.register_title")}</h1>
+      <p class="small">${t("auth.lede")}</p>
+    </div>
+    <form class="card stack gap-14" data-auth-form data-mode="${mode}">
+      <label class="stack gap-6">
+        <span class="field-label">${t("auth.username")}</span>
+        <input type="text" name="username" autocomplete="username" autocapitalize="none"
+               spellcheck="false" required minlength="2" maxlength="24" data-autofocus />
+        ${isLogin ? "" : `<span class="tiny">${t("auth.hint_user")}</span>`}
+      </label>
+      <label class="stack gap-6">
+        <span class="field-label">${t("auth.password")}</span>
+        <input type="password" name="password" autocomplete="${isLogin ? "current-password" : "new-password"}" required minlength="6" />
+        <span class="tiny">${t("auth.hint_pass")}</span>
+      </label>
+      <button class="btn block" type="submit">${isLogin ? t("auth.login") : t("auth.register")}</button>
+    </form>
+    <button class="btn ghost block" data-act="auth-mode" data-mode="${isLogin ? "register" : "login"}">
+      ${isLogin ? t("auth.to_register") : t("auth.to_login")}
+    </button>
+  </div>`;
+  const first = view.querySelector("[data-autofocus]");
+  if (first) first.focus({ preventScroll: true });
+}
+
+document.addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-auth-form]");
+  if (!form) return;
+  event.preventDefault();
+  const mode = form.dataset.mode;
+  const username = form.querySelector('[name="username"]').value.trim();
+  const password = form.querySelector('[name="password"]').value;
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  button.textContent = t("auth.logging_in");
+  try {
+    if (mode === "login") await api.login(username, password);
+    else await api.register(username, password);
+    location.reload();
+  } catch (err) {
+    toast(err.message);
+    button.disabled = false;
+    button.textContent = mode === "login" ? t("auth.login") : t("auth.register");
+  }
+});
+
+/* 会话在别的设备被踢掉、或过期时，任何一次请求都可能带回 401 */
+window.addEventListener("tether:unauthorized", () => {
+  if (!document.body.classList.contains("gated")) renderAuth();
+});
+
+async function doLogout() {
+  try {
+    await api.logout();
+  } catch {
+    /* 网络断了也要让本地退出 */
+  }
+  location.reload();
+}
+
+async function doRedeem() {
+  const input = overlay.querySelector('[name="code"]');
+  const button = overlay.querySelector("[data-act='redeem-submit']");
+  const code = (input && input.value) || "";
+  if (!code.trim()) return;
+  button.disabled = true;
+  try {
+    const res = await api.redeem(code.trim());
+    state.account = res.account;
+    invalidateInsights();
+    closeOverlay();
+    render();
+    toast(t("redeem.done"));
+  } catch (err) {
+    toast(err.message);
+    button.disabled = false;
+  }
+}
+
+function openRedeem() {
+  openOverlay(`<div class="sheet center">
+    <div class="row-between" style="margin-bottom:6px">
+      <span class="eyebrow">Tether Pro</span>
+      ${sheetClose()}
+    </div>
+    <h2 class="display sm" style="margin-bottom:8px">${t("redeem.title")}</h2>
+    <p class="body-lg" style="margin-bottom:18px">${t("redeem.lede")}</p>
+    <div class="card stack gap-12" style="margin-bottom:16px">
+      ${[t("pay.f1"), t("pay.f2"), t("pay.f3")]
+        .map(
+          (line) => `<div class="row gap-8" style="align-items:flex-start">
+            <span style="color:var(--moss);font-weight:700" aria-hidden="true">✓</span>
+            <span class="small" style="color:var(--ink-2)">${line}</span>
+          </div>`
+        )
+        .join("")}
+    </div>
+    <input type="text" name="code" placeholder="${t("redeem.placeholder")}" autocapitalize="characters"
+           spellcheck="false" style="text-transform:uppercase;letter-spacing:0.08em" data-autofocus />
+    <button class="btn block" data-act="redeem-submit" style="margin-top:12px">${t("redeem.submit")}</button>
+  </div>`, { label: t("redeem.title") });
+}
+
+function openPasswordSheet() {
+  openOverlay(`<div class="sheet center">
+    <div class="row-between" style="margin-bottom:6px">
+      <span class="eyebrow">${t("me.account")}</span>
+      ${sheetClose()}
+    </div>
+    <h2 class="display sm" style="margin-bottom:14px">${t("me.change_password")}</h2>
+    <div class="card stack gap-14">
+      <label class="stack gap-6">
+        <span class="field-label">${t("me.old_password")}</span>
+        <input type="password" name="old_password" autocomplete="current-password" data-autofocus />
+      </label>
+      <label class="stack gap-6">
+        <span class="field-label">${t("me.new_password")}</span>
+        <input type="password" name="new_password" autocomplete="new-password" />
+      </label>
+      <button class="btn block" data-act="password-submit">${t("me.change_password")}</button>
+    </div>
+  </div>`, { label: t("me.change_password") });
+}
+
+async function doChangePassword() {
+  const oldPw = (overlay.querySelector('[name="old_password"]') || {}).value || "";
+  const newPw = (overlay.querySelector('[name="new_password"]') || {}).value || "";
+  try {
+    await api.changePassword(oldPw, newPw);
+    closeOverlay();
+    toast(t("me.password_done"));
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
 /* --------------------------------------------------------------- 启动 */
 
 async function boot() {
@@ -2042,6 +2201,7 @@ async function boot() {
   try {
     storedLang = localStorage.getItem("tether.lang");
     theme.pref = localStorage.getItem("tether.theme") || "auto";
+    voice.lang = localStorage.getItem("tether.voice") || "";
   } catch {
     /* 无痕模式：用默认值 */
   }
@@ -2051,6 +2211,20 @@ async function boot() {
   applyStaticText();
   applyTheme();
   render();
+
+  /* 先确认登录态。没登录就停在这里：不拉数据、不渲染外壳，
+     免得每个接口都 401 再各自弹一遍 toast。 */
+  try {
+    const mine = await api.me();
+    state.account = mine.account;
+  } catch (err) {
+    /* 只有 401 才算「没登录」。连不上服务时不要把人推到登录页，
+       否则离线打开会看到一个莫名其妙的登录框。 */
+    if (err.status === 401) {
+      renderAuth();
+      return;
+    }
+  }
 
   try {
     await loadMeta();

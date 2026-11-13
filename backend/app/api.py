@@ -31,13 +31,13 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import ai, content, db, insights, seed
+from . import ai, auth, content, db, insights, seed
 
-PRICING = {
-    "monthly": {"price": "$9", "period": {"zh": "/ 月", "en": "/ month"}},
-    "yearly": {"price": "$59", "period": {"zh": "/ 年", "en": "/ year"}, "note": {"zh": "相当于 $4.9/月", "en": "works out to $4.9/mo"}},
-    "trial_days": 7,
-}
+# 没有订阅、没有支付：Pro 只能靠兑换码开通（见 auth.redeem）
+
+# 不需要登录就能访问的接口。登录页要拿 meta 才能渲染情绪与地区；
+# 危机资源任何时候都该能打开，不能卡在登录后面。
+PUBLIC_PATHS = {"/api/health", "/api/meta", "/api/crisis"}
 
 
 # --------------------------------------------------------------------------- #
@@ -60,6 +60,9 @@ class Request:
         self.body = body
         self.headers = headers
         self.params: dict[str, str] = {}
+        # 由 dispatch 填：当前登录用户 + 会话 token
+        self.user: dict | None = None
+        self.sid: str = ""
 
     def q(self, key: str, default: str | None = None) -> str | None:
         values = self.query.get(key)
@@ -162,10 +165,12 @@ def _rows(sql: str, params: list | None = None) -> list[dict]:
         conn.close()
 
 
-def _one(entry_id: int) -> dict:
+def _one(entry_id: int, user_id: int) -> dict:
     conn = _connect()
     try:
-        row = conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id)
+        ).fetchone()
     finally:
         conn.close()
     if not row:
@@ -215,18 +220,19 @@ def _normalize_time(occurred_at: str | None, tz_offset: int) -> tuple[str, str, 
     )
 
 
-def _insert_entry(row: dict) -> int:
+def _insert_entry(row: dict, user_id: int) -> int:
     now = db.now_iso()
     conn = _connect()
     try:
         cur = conn.execute(
             """
-            INSERT INTO entries (emotion, severity, cause, note, occurred_at, local_date,
+            INSERT INTO entries (user_id, emotion, severity, cause, note, occurred_at, local_date,
                                  local_hour, tz_offset, intervention_branch,
                                  intervention_completed, relief, tags, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                user_id,
                 row["emotion"],
                 row["severity"],
                 row["cause"],
@@ -262,11 +268,14 @@ def health(req: Request):
 @router.route("GET", "/api/meta")
 def meta(req: Request):
     payload = content.meta_payload(req.lang)
-    payload["pricing"] = PRICING
-    payload["plan"] = db.get_setting("plan", "free")
-    payload["region"] = db.get_setting("region", "US")
-    payload["lang"] = db.get_setting("lang", "zh")
-    payload["has_data"] = bool(_rows("SELECT id FROM entries LIMIT 1"))
+    user = req.user
+    payload["logged_in"] = bool(user)
+    payload["plan"] = user["plan"] if user else "free"
+    payload["region"] = user["region"] if user else db.DEFAULTS["region"]
+    payload["lang"] = user["lang"] if user else "zh"
+    payload["has_data"] = (
+        bool(_rows("SELECT id FROM entries WHERE user_id = ? LIMIT 1", [user["id"]])) if user else False
+    )
     payload["ai"] = ai.public_config()
     return payload
 
@@ -279,6 +288,7 @@ def meta(req: Request):
 @router.route("POST", "/api/entries")
 def create_entry(req: Request):
     body = req.json()
+    uid = req.user["id"]
     emotion = body.get("emotion")
     if emotion not in content.EMOTION_KEYS:
         raise ApiError(422, "unknown emotion")
@@ -295,18 +305,19 @@ def create_entry(req: Request):
             "local_date": local_date,
             "local_hour": local_hour,
             "tz_offset": int(body.get("tz_offset") or 0),
-        }
+        },
+        uid,
     )
     return {
-        "entry": _one(entry_id),
+        "entry": _one(entry_id, uid),
         "intervention": content.intervention_for(emotion, req.lang),
     }
 
 
 @router.route("GET", "/api/entries")
 def list_entries(req: Request):
-    where = ["1=1"]
-    params: list = []
+    where = ["user_id = ?"]
+    params: list = [req.user["id"]]
     emotion = req.q("emotion")
     if emotion and emotion != "all":
         where.append("emotion = ?")
@@ -345,7 +356,8 @@ def list_entries(req: Request):
 def delete_all_entries(req: Request):
     conn = _connect()
     try:
-        deleted = conn.execute("DELETE FROM entries").rowcount
+        # 只清当前账号自己的记录
+        deleted = conn.execute("DELETE FROM entries WHERE user_id = ?", (req.user["id"],)).rowcount
         conn.commit()
     finally:
         conn.close()
@@ -354,13 +366,14 @@ def delete_all_entries(req: Request):
 
 @router.route("GET", r"/api/entries/(?P<entry_id>\d+)")
 def get_entry(req: Request):
-    return _one(int(req.params["entry_id"]))
+    return _one(int(req.params["entry_id"]), req.user["id"])
 
 
 @router.route("PATCH", r"/api/entries/(?P<entry_id>\d+)")
 def patch_entry(req: Request):
     entry_id = int(req.params["entry_id"])
-    _one(entry_id)
+    uid = req.user["id"]
+    _one(entry_id, uid)
     body = req.json()
     fields: dict[str, Any] = {}
     if "severity" in body:
@@ -377,20 +390,24 @@ def patch_entry(req: Request):
     sets = ", ".join(f"{k} = ?" for k in fields)
     conn = _connect()
     try:
-        conn.execute(f"UPDATE entries SET {sets} WHERE id = ?", list(fields.values()) + [entry_id])
+        conn.execute(
+            f"UPDATE entries SET {sets} WHERE id = ? AND user_id = ?",
+            list(fields.values()) + [entry_id, uid],
+        )
         conn.commit()
     finally:
         conn.close()
-    return _one(entry_id)
+    return _one(entry_id, uid)
 
 
 @router.route("DELETE", r"/api/entries/(?P<entry_id>\d+)")
 def delete_entry(req: Request):
     entry_id = int(req.params["entry_id"])
-    _one(entry_id)
+    uid = req.user["id"]
+    _one(entry_id, uid)
     conn = _connect()
     try:
-        conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+        conn.execute("DELETE FROM entries WHERE id = ? AND user_id = ?", (entry_id, uid))
         conn.commit()
     finally:
         conn.close()
@@ -413,7 +430,8 @@ def get_intervention(req: Request):
 @router.route("POST", r"/api/entries/(?P<entry_id>\d+)/intervention")
 def record_intervention(req: Request):
     entry_id = int(req.params["entry_id"])
-    _one(entry_id)
+    uid = req.user["id"]
+    _one(entry_id, uid)
     body = req.json()
     relief = body.get("relief")
     if relief not in (None, "", "better", "same", "worse"):
@@ -421,13 +439,14 @@ def record_intervention(req: Request):
     conn = _connect()
     try:
         conn.execute(
-            "UPDATE entries SET intervention_completed = ?, relief = ?, updated_at = ? WHERE id = ?",
-            (1 if body.get("completed", True) else 0, relief or None, db.now_iso(), entry_id),
+            "UPDATE entries SET intervention_completed = ?, relief = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (1 if body.get("completed", True) else 0, relief or None, db.now_iso(), entry_id, uid),
         )
         conn.commit()
     finally:
         conn.close()
-    return _one(entry_id)
+    return _one(entry_id, uid)
 
 
 # --------------------------------------------------------------------------- #
@@ -439,15 +458,21 @@ def record_intervention(req: Request):
 def stats_basic(req: Request):
     days = max(1, min(req.qi("days", 30), 3650))
     since = (db.now_utc() - timedelta(days=days)).isoformat(timespec="seconds")
-    entries = _rows("SELECT * FROM entries WHERE occurred_at >= ? ORDER BY occurred_at", [since])
+    entries = _rows(
+        "SELECT * FROM entries WHERE user_id = ? AND occurred_at >= ? ORDER BY occurred_at",
+        [req.user["id"], since],
+    )
     payload = insights.build_basic(entries, req.lang)
     payload["window_days"] = days
     return payload
 
 
-def _window_entries(days: int) -> list[dict]:
+def _window_entries(days: int, user_id: int) -> list[dict]:
     since = (db.now_utc() - timedelta(days=days)).isoformat(timespec="seconds")
-    return _rows("SELECT * FROM entries WHERE occurred_at >= ? ORDER BY occurred_at", [since])
+    return _rows(
+        "SELECT * FROM entries WHERE user_id = ? AND occurred_at >= ? ORDER BY occurred_at",
+        [user_id, since],
+    )
 
 
 def _redact(text: str) -> str:
@@ -498,8 +523,8 @@ def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str)
 @router.route("GET", "/api/insights")
 def get_insights(req: Request):
     days = max(1, min(req.qi("days", 14), 3650))
-    plan = db.get_setting("plan", "free")
-    entries = _window_entries(days)
+    plan = req.user["plan"]
+    entries = _window_entries(days, req.user["id"])
     payload = insights.build_insights(entries, days, req.lang, locked=(plan != "pro"))
     payload["ai"] = _ai_state(entries, days, req.lang, payload, plan)
     return payload
@@ -512,7 +537,7 @@ def analyze_insights(req: Request):
     这是唯一一个会真的阻塞几秒的接口；失败不走 500，而是带着错误状态返回规则版，
     前端因此永远有内容可显示。
     """
-    plan = db.get_setting("plan", "free")
+    plan = req.user["plan"]
     if plan != "pro":
         raise ApiError(403, "AI 分析属于 Pro 层")
 
@@ -529,7 +554,7 @@ def analyze_insights(req: Request):
     force = bool(body.get("force"))
     lang = req.lang
 
-    entries = _window_entries(days)
+    entries = _window_entries(days, req.user["id"])
     rules = insights.build_insights(entries, days, lang, locked=False)
 
     if len(entries) < insights.MIN_SAMPLE:
@@ -578,60 +603,110 @@ def analyze_insights(req: Request):
 
 
 # --------------------------------------------------------------------------- #
-# 账户
+# 账号 / 登录
 # --------------------------------------------------------------------------- #
 
 
-def _account_payload() -> dict:
-    plan = db.get_setting("plan", "free")
-    total = _rows("SELECT COUNT(*) AS c FROM entries")[0]["c"]
+def _account_payload(user: dict) -> dict:
+    total = _rows("SELECT COUNT(*) AS c FROM entries WHERE user_id = ?", [user["id"]])[0]["c"]
     return {
-        "plan": plan,
-        "pro": plan == "pro",
-        "region": db.get_setting("region", "US"),
-        "lang": db.get_setting("lang", "zh"),
+        "user": {"id": user["id"], "username": user["username"], "created_at": user["created_at"]},
+        "plan": user["plan"],
+        "pro": user["plan"] == "pro",
+        "region": user["region"],
+        "lang": user["lang"],
         "entries": total,
-        "pricing": PRICING,
         "note": {
-            "zh": "演示环境：订阅状态仅保存在本地，不涉及真实扣款。",
-            "en": "Demo build: subscription state is stored locally. No real payment happens.",
+            "zh": "Pro 用兑换码开通，没有订阅、也不会扣款。",
+            "en": "Pro is unlocked with a redeem code. No subscription, no charges.",
         },
     }
 
 
+def _session_response(user: dict) -> Response:
+    token, _ = auth.create_session(user["id"])
+    resp = Response(payload={"account": _account_payload(user)})
+    resp.headers["Set-Cookie"] = (
+        f"{auth.COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={auth.SESSION_DAYS * 86400}"
+    )
+    return resp
+
+
+@router.route("POST", "/api/auth/register")
+def register(req: Request):
+    body = req.json()
+    user = auth.create_user((body.get("username") or "").strip(), body.get("password") or "")
+    return _session_response(user)
+
+
+@router.route("POST", "/api/auth/login")
+def login(req: Request):
+    body = req.json()
+    user = auth.authenticate((body.get("username") or "").strip(), body.get("password") or "")
+    return _session_response(user)
+
+
+@router.route("POST", "/api/auth/logout")
+def logout(req: Request):
+    if req.sid:
+        auth.delete_session(req.sid)
+    resp = Response(payload={"ok": True})
+    resp.headers["Set-Cookie"] = f"{auth.COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+    return resp
+
+
+@router.route("GET", "/api/auth/me")
+def whoami(req: Request):
+    if not req.user:
+        raise ApiError(401, "login required")
+    return {"account": _account_payload(req.user)}
+
+
+@router.route("POST", "/api/auth/password")
+def change_password(req: Request):
+    body = req.json()
+    old = body.get("old_password") or ""
+    new = body.get("new_password") or ""
+    auth.authenticate(req.user["username"], old)
+    auth.set_password(req.user["id"], new)
+    # 改密码会踢掉所有会话，这里立刻补一个新的，免得自己被登出
+    return _session_response(req.user)
+
+
+@router.route("POST", "/api/account/redeem")
+def redeem_code(req: Request):
+    code = req.json().get("code") or ""
+    user = auth.redeem(req.user["id"], code)
+    return {"account": _account_payload(user), "ok": True}
+
+
 @router.route("GET", "/api/account")
 def get_account(req: Request):
-    return _account_payload()
-
-
-@router.route("POST", "/api/account/subscription")
-def set_subscription(req: Request):
-    plan = req.json().get("plan")
-    if plan not in ("free", "pro"):
-        raise ApiError(422, "plan must be free or pro")
-    db.set_setting("plan", plan)
-    return _account_payload()
+    return _account_payload(req.user)
 
 
 @router.route("PATCH", "/api/account/settings")
 def update_settings(req: Request):
     body = req.json()
+    fields: dict[str, Any] = {}
     region = body.get("region")
     if region is not None:
         if region not in content.REGION_KEYS:
             raise ApiError(422, "unknown region")
-        db.set_setting("region", region)
+        fields["region"] = region
     lang = body.get("lang")
     if lang is not None:
         if lang not in ("zh", "en"):
             raise ApiError(422, "lang must be zh or en")
-        db.set_setting("lang", lang)
-    return _account_payload()
+        fields["lang"] = lang
+    user = auth.update_user(req.user["id"], **fields)
+    return _account_payload(user)
 
 
 @router.route("GET", "/api/crisis")
 def crisis(req: Request):
-    return content.crisis_for(req.q("region") or "US", req.lang)
+    fallback = req.user["region"] if req.user else db.DEFAULTS["region"]
+    return content.crisis_for(req.q("region") or fallback, req.lang)
 
 
 # --------------------------------------------------------------------------- #
@@ -641,7 +716,9 @@ def crisis(req: Request):
 
 @router.route("GET", "/api/export")
 def export(req: Request):
-    rows = _rows("SELECT * FROM entries ORDER BY occurred_at DESC")
+    rows = _rows(
+        "SELECT * FROM entries WHERE user_id = ? ORDER BY occurred_at DESC", [req.user["id"]]
+    )
     if (req.q("format") or "json") == "csv":
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -682,16 +759,17 @@ def export(req: Request):
 def demo_seed(req: Request):
     tz_offset = max(-840, min(req.qi("tz_offset", 480), 840))
     reset = req.qb("reset", True)
+    uid = req.user["id"]
     conn = _connect()
     try:
         if reset:
-            conn.execute("DELETE FROM entries")
+            conn.execute("DELETE FROM entries WHERE user_id = ?", (uid,))
         conn.commit()
     finally:
         conn.close()
     for row in seed.build_rows(tz_offset):
-        _insert_entry(row)
-    total = _rows("SELECT COUNT(*) AS c FROM entries")[0]["c"]
+        _insert_entry(row, uid)
+    total = _rows("SELECT COUNT(*) AS c FROM entries WHERE user_id = ?", [uid])[0]["c"]
     return {"seeded": True, "entries": total}
 
 
@@ -700,8 +778,25 @@ def demo_seed(req: Request):
 # --------------------------------------------------------------------------- #
 
 
+def _cookie(req: Request, name: str) -> str:
+    raw = req.headers.get("cookie") or ""
+    for part in raw.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return urllib.parse.unquote(value)
+    return ""
+
+
 def dispatch(req: Request) -> Response:
     try:
+        # 先把会话解出来：公开接口也想知道「谁在访问」（比如 meta 要回该用户的 plan）
+        req.sid = _cookie(req, auth.COOKIE_NAME)
+        req.user = auth.user_by_token(req.sid)
+
+        public = req.path in PUBLIC_PATHS or req.path.startswith("/api/auth/")
+        if not public and not req.user:
+            raise ApiError(401, "login required")
+
         handler, params = router.match(req.method, req.path)
         req.params = params
         result = handler(req)
@@ -709,6 +804,8 @@ def dispatch(req: Request) -> Response:
             return result
         return Response(payload=result)
     except ApiError as exc:
+        return Response(status=exc.status, payload={"error": exc.message})
+    except auth.AuthError as exc:
         return Response(status=exc.status, payload={"error": exc.message})
     except Exception:  # noqa: BLE001
         traceback.print_exc()
