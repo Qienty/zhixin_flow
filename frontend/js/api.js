@@ -19,9 +19,9 @@ export function setApiLang(value) {
 }
 
 function qs(params = {}) {
-  const search = new URLSearchParams({ lang, ...params });
-  for (const [k, v] of [...search.entries()]) {
-    if (v === undefined || v === null || v === "") search.delete(k);
+  const search = new URLSearchParams({ lang, tz_offset: tzOffset() });
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") search.set(key, String(value));
   }
   return search.toString();
 }
@@ -51,10 +51,14 @@ async function call(path, { method = "GET", body, params } = {}) {
     error.status = res.status;
     throw error;
   }
+  if (data === null) throw new Error(`Invalid JSON response (${res.status})`);
   return data;
 }
 
 export const api = {
+  bootstrap: () => call("/api/bootstrap"),
+  home: () => call("/api/home"),
+  importEntries: (entries) => call("/api/import", { method: "POST", body: { entries } }),
   meta: () => call("/api/meta"),
 
   entries: (params) => call("/api/entries", { params }),
@@ -67,11 +71,11 @@ export const api = {
   recordIntervention: (id, payload) =>
     call(`/api/entries/${id}/intervention`, { method: "POST", body: payload }),
 
-  stats: (days) => call("/api/stats/basic", { params: { days } }),
-  insights: (days) => call("/api/insights", { params: { days } }),
+  stats: () => call("/api/stats/basic"),
+  insights: () => call("/api/insights"),
   /* 唯一会阻塞几秒的接口：让模型重写这一屏的结论 */
-  analyzeInsights: (days, force = false) =>
-    call("/api/insights/analyze", { method: "POST", body: { days, force } }),
+  analyzeInsights: (force = false) =>
+    call("/api/insights/analyze", { method: "POST", body: { force } }),
 
   account: () => call("/api/account"),
   redeem: (code) => call("/api/account/redeem", { method: "POST", body: { code } }),
@@ -87,7 +91,7 @@ export const api = {
     call("/api/auth/password", { method: "POST", body: { old_password, new_password } }),
 
   crisis: (region) => call("/api/crisis", { params: { region } }),
-  seed: (tzOffset) => call("/api/demo/seed", { method: "POST", params: { tz_offset: tzOffset, reset: 1 } }),
+  seed: (tzOffset) => call("/api/demo/seed", { method: "POST", params: { tz_offset: tzOffset } }),
 
   wheel: () => call("/api/wheel"),
   saveWheel: (items) => call("/api/wheel", { method: "PUT", body: { items } }),

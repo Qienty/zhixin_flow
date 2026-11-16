@@ -8,9 +8,9 @@ import { t, setLang, getLang, applyStaticText } from "./i18n.js";
 const SEV_COLOR = { 1: "#7C9A87", 2: "#9C9A5C", 3: "#C08A3E", 4: "#B4523F", 5: "#8E3626" };
 
 const BRANCH_LABEL = {
-  anger: { zh: "30 秒降唤醒", en: "30s down-shift" },
-  sadness: { zh: "陪伴 + 手放胸口", en: "company + hand" },
-  despair: { zh: "托底 + 热线", en: "safety + lines" },
+  anger: { zh: "30 秒降唤醒", en: "Pause and breathe" },
+  sadness: { zh: "陪伴 + 手放胸口", en: "A moment of comfort" },
+  despair: { zh: "托底 + 热线", en: "Support and crisis help" },
   anxiety: { zh: "延长呼气", en: "long exhale" },
   none: { zh: "", en: "" },
 };
@@ -22,7 +22,6 @@ const SEV_LABEL = {
 
 const VIEWS = ["now", "log", "insights", "me"];
 const PAGE_SIZE = 40;
-const ENTRY_LIMIT = 1000; // 后端上限；超出之后计数改用服务端 total
 
 const state = {
   view: "now",
@@ -30,12 +29,18 @@ const state = {
   account: null,
   entries: [],
   total: 0,
-  filter: { emotion: "all", sort: "severity", unfilled: false },
-  logLimit: PAGE_SIZE,
-  insightsDays: 30,
+  filter: { emotion: "all", sort: "severity", unfilled: false, older: false },
+  insightsDays: 14,
+  home: { items: [], watch: false, total: 0 },
+  logReady: false,
+  logCursor: null,
+  logTotal: 0,
+  logPages: [null],
+  logPage: 0,
+  logBusy: false,
   insights: null,
   stats: null,
-  /* AI 分析是异步的：进来先显示规则版 + 骨架，模型回来再替换 */
+  /* AI 只在用户点击分析后运行，统计始终可以直接查看。 */
   aiBusy: false,
   aiError: "",
 };
@@ -147,6 +152,11 @@ function fmtDay(iso) {
   return timeLabels(iso).day;
 }
 
+function entryTime(entry) {
+  const date = new Date(new Date(entry.occurred_at).getTime() + (entry.tz_offset || 0) * 60000);
+  return `${entry.local_date || date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)}`;
+}
+
 /* toLocaleTimeString / toLocaleDateString 每次调用都要重建一个 Intl 格式化器，
 一条记录要两次，上千条就是几千次——这是长列表里最贵的一块。
 格式化器按语言缓存，格式化结果再按 ISO 串缓存（记录的时间不会变）。
@@ -243,8 +253,8 @@ function applyTheme() {
   const btn = $("#theme-btn");
   if (btn) {
     btn.innerHTML = THEME_ICON[theme.pref];
-    btn.setAttribute("aria-label", t(`theme.${theme.pref}`));
-    btn.title = t(`theme.${theme.pref}`);
+    btn.setAttribute("aria-label", t("theme.action", { current: t(`theme.${theme.pref}`) }));
+    btn.title = btn.getAttribute("aria-label");
   }
 }
 
@@ -297,53 +307,87 @@ async function loadAccount() {
   chip.textContent = pro ? "PRO" : "";
 }
 
-async function loadEntries() {
-  const res = await api.entries({ sort: "severity", limit: ENTRY_LIMIT });
-  state.entries = res.items;
-  state.total = res.total;
+let logSeq = 0;
+async function loadEntries({ cursor = null, page = 0 } = {}) {
+  const seq = ++logSeq;
+  state.logBusy = true;
+  try {
+    const res = await api.entries({ ...state.filter, limit: PAGE_SIZE, cursor });
+    if (seq !== logSeq) return;
+    state.entries = res.items;
+    state.logTotal = res.total;
+    state.logCursor = res.next_cursor;
+    state.logReady = true;
+    state.logPage = page;
+    if (!page) state.logPages = [null];
+    state.logPages[page + 1] = res.next_cursor;
+  } finally { if (seq === logSeq) state.logBusy = false; }
+}
+async function loadHome() {
+  state.home = await api.home();
+  state.total = state.home.total;
+}
+async function reloadLog() {
+  await loadEntries();
+  if (state.view === "log") renderLogList();
+}
+async function pageLog(forward) {
+  if (state.logBusy || (forward && !state.logCursor)) return;
+  const page = Math.max(0, state.logPage + (forward ? 1 : -1));
+  await loadEntries({ cursor: state.logPages[page], page });
+  renderLogList();
+  $("#log-body")?.scrollIntoView({ block: "start" });
+}
+async function entriesChanged() {
+  invalidateInsights();
+  state.logReady = false;
+  await Promise.all([loadHome(), loadAccount(), state.view === "log" ? loadEntries() : Promise.resolve()]);
+  if (state.view === "insights") await loadInsights();
+  render();
 }
 
 /* 记录一变，总结就过期。原来只在切换统计窗口时重拉，
 于是「记几条 → 回总结页」看到的还是进页面时那份数字。 */
 function invalidateInsights() {
+  ++insightsSeq;
+  ++aiSeq;
+  state.aiBusy = false;
   state.insights = null;
   state.stats = null;
   state.aiError = "";
 }
 
-/* 快速来回点 14 / 30 天时，慢的那个响应不该覆盖后点的那个 */
+/* 记录改动或切换账号后，旧响应不能覆盖新状态。 */
 let insightsSeq = 0;
 /* AI 分析同理：切了窗口或重发请求，旧的那份回来就该丢掉 */
 let aiSeq = 0;
 
 async function loadInsights() {
   const seq = ++insightsSeq;
-  const days = state.insightsDays;
-  const [ins, stats] = await Promise.all([api.insights(days), api.stats(days)]);
+  const [ins, stats] = await Promise.all([api.insights(), api.stats()]);
   if (seq !== insightsSeq) return false;
   state.insights = ins;
   state.stats = stats;
-  /* 后端不在这里同步等模型：它只告诉前端「还没分析过」，
-     真正的生成交给 runAnalysis，页面因此能立刻出骨架。 */
-  if (ins.ai && ins.ai.status === "pending") runAnalysis();
+  // Model calls only happen after an explicit analyze action.
   return true;
 }
 
 async function runAnalysis({ force = false } = {}) {
-  if (!state.insights) return;
+  if (!state.insights || state.aiBusy) return;
   const days = state.insightsDays;
   const seq = ++aiSeq;
   state.aiBusy = true;
   state.aiError = "";
   if (state.view === "insights") render();
   try {
-    const payload = await api.analyzeInsights(days, force);
+    const payload = await api.analyzeInsights(force);
     if (seq !== aiSeq || days !== state.insightsDays) return;
     state.insights = payload;
     if (payload.ai && payload.ai.status === "error") state.aiError = payload.ai.message || "";
   } catch (err) {
     if (seq !== aiSeq) return;
     state.aiError = err.message;
+    if (state.insights?.ai) state.insights.ai.status = "error";
   } finally {
     if (seq === aiSeq) {
       state.aiBusy = false;
@@ -354,7 +398,11 @@ async function runAnalysis({ force = false } = {}) {
 
 async function refresh({ entries = true, account = true, insights = false } = {}) {
   const jobs = [];
-  if (entries) jobs.push(loadEntries());
+  if (entries) {
+    state.logReady = false;
+    jobs.push(loadHome());
+    if (state.view === "log") jobs.push(loadEntries());
+  }
   if (account) jobs.push(loadAccount());
   if (insights) jobs.push(loadInsights());
   await Promise.all(jobs);
@@ -405,11 +453,18 @@ async function nav(view) {
 
 async function ensureViewData(view) {
   try {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    if (state.account && state.home.local_today !== today) {
+      invalidateInsights();
+      await loadHome();
+      if (state.view === "now") render();
+    }
     if (view === "insights" && !state.insights) {
       await loadInsights();
       if (state.view === "insights") render();
     }
-    if (view === "log" && !state.entries.length && state.total === 0) {
+    if (view === "log" && !state.logReady) {
       await loadEntries();
       if (state.view === "log") render();
     }
@@ -425,6 +480,10 @@ window.addEventListener("popstate", (event) => {
     如果不认领它：用户按 Esc 之后马上点别的 tab，pop 会在导航之后才到，
     于是刚打开的视图又被退回上一个。 */
     pendingPop -= 1;
+    return;
+  }
+  if (overlayInHistory && iv.saving) {
+    history.pushState({ view: state.view, overlay: true }, '', location.hash);
     return;
   }
   if (overlayInHistory) {
@@ -458,6 +517,7 @@ function render() {
     view.innerHTML = loadingBlock();
     return;
   }
+  if (!state.account) { renderAuth(); return; }
   if (state.view === "now") view.innerHTML = viewNow();
   else if (state.view === "log") view.innerHTML = viewLog();
   else if (state.view === "insights") view.innerHTML = viewInsights();
@@ -507,7 +567,7 @@ function entryRow(entry) {
       <span>
         <span class="entry-head">
           <span class="entry-emotion"><span class="dot"></span>${esc(meta.label)}</span>
-          <span class="entry-time">${fmtDay(entry.occurred_at)} ${fmtTime(entry.occurred_at)}</span>
+          <span class="entry-time">${esc(entryTime(entry))}</span>
         </span>
         <span class="entry-cause ${entry.cause ? "" : "missing"}">${esc(entry.cause) || t("entry.unfilled")}</span>
         ${tags.length ? `<span class="entry-meta">${tags.join("")}</span>` : ""}
@@ -520,8 +580,8 @@ function viewNow() {
   const emotions = (state.meta && state.meta.emotions) || [];
   const primary = emotions.filter((e) => primaryKeys.includes(e.key)).map((e) => ({ ...e, color: adapt(e.color) }));
   const secondary = emotions.filter((e) => !primaryKeys.includes(e.key)).map((e) => ({ ...e, color: adapt(e.color) }));
-  const watch = state.entries.filter((e) => (e.severity || 0) >= 4).slice(0, 3);
-  const empty = state.entries.length === 0;
+  const watch = state.home.watch ? state.home.items : [];
+  const empty = state.home.total === 0;
 
   return `<div class="stack gap-24">
     <div class="stack gap-4">
@@ -532,7 +592,7 @@ function viewNow() {
 
     <div class="stack gap-12">
       <div class="row-between">
-        <span class="eyebrow">${t("now.primary_label")}</span>
+        <h2 class="eyebrow">${t("now.primary_label")}</h2>
         <span class="tiny">${t("now.primary_note")}</span>
       </div>
       <div class="emo-primary">${primary.map((e) => emotionTile(e, true)).join("")}</div>
@@ -546,13 +606,14 @@ function viewNow() {
         ? `<div class="empty stack gap-12" style="align-items:center">
           <h2 class="display sm">${t("now.empty_title")}</h2>
           <p class="small" style="max-width:34ch">${t("now.empty_body")}</p>
+          <ol class="onboarding small"><li>${t("now.step1")}</li><li>${t("now.step2")}</li><li>${t("now.step3")}</li></ol>
           <button class="btn soft sm" data-act="seed">${t("now.load_demo")}</button>
             <p class="tiny">${t("now.demo_note")}</p>
           </div>`
         : watch.length
         ? `<div class="stack gap-12">
           <div class="row-between">
-            <span class="eyebrow">${t("now.watch")}</span>
+            <h2 class="eyebrow">${t("now.watch")}</h2>
             <span class="tiny">${t("now.watch_note")}</span>
           </div>
           <div class="entry-list">${watch.map(entryRow).join("")}</div>
@@ -560,10 +621,10 @@ function viewNow() {
         </div>`
         : `<div class="stack gap-12">
             <div class="row-between">
-<span class="eyebrow">${t("now.recent")}</span>
+<h2 class="eyebrow">${t("now.recent")}</h2>
 <button class="chip" data-act="nav" data-view="log">${t("now.all_logs")}</button>
 </div>
-<div class="entry-list">${state.entries.slice(0, 3).map(entryRow).join("")}</div>
+<div class="entry-list">${state.home.items.map(entryRow).join("")}</div>
 </div>`
     }
 
@@ -573,54 +634,38 @@ function viewNow() {
 
 /* ------------------------------------------------------------- 记录视图 */
 
-/* 本地只缓存了前 ENTRY_LIMIT 条。没有筛选的时候，计数用服务端给的 total，
-否则记录过万之后标题会一直停在 1000 条。 */
+/* 计数与筛选由服务端完成，不受当前页大小影响。 */
 function countLabel(list) {
-  const plain = state.filter.emotion === "all" && !state.filter.unfilled;
-  const n = plain && state.total > state.entries.length ? state.total : list.length;
-  return t("log.count", { n });
+  return t("log.count", { n: state.logTotal });
 }
 
 function filteredEntries() {
-  let list = state.entries;
-  if (state.filter.emotion !== "all") list = list.filter((e) => e.emotion === state.filter.emotion);
-  if (state.filter.unfilled) list = list.filter((e) => !e.cause || !e.severity);
-  if (state.filter.sort === "time") {
-    list = list.slice().sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at));
-  }
-  return list;
+  return state.entries;
 }
 
-/* 按时间排序时插日期分隔，按严重程度排序时不插——那时顺序本来就不是按天走的 */
+/* 时间排序按日期分组；强度排序按分值分组，保留强度优先。 */
 function entryListHtml(list) {
+  if (!state.logReady) return loadingBlock();
   if (!list.length) {
     return `<div class="empty stack gap-8">
       <h2 class="display sm">${t("log.empty_title")}</h2>
       <p class="small">${t("log.empty_body")}</p>
     </div>`;
   }
-  const page = list.slice(0, state.logLimit);
-  let html = "";
+  const page = list;
+  let html = state.filter.unfilled ? `<div class="card row-between"><span class="small">${t("log.pending_count", { n: state.logTotal })}</span><button class="btn soft sm" data-act="complete-next">${t("log.complete_next")}</button></div>` : "";
   let lastDay = null;
   for (const entry of page) {
-    if (state.filter.sort === "time") {
-      const day = fmtDay(entry.occurred_at);
+    {
+      const day = state.filter.sort === "time" ? entry.local_date : entry.severity ? t("log.severity_group", { n: entry.severity }) : t("log.unfilled");
       if (day !== lastDay) {
-        html += `${lastDay ? "</div>" : ""}<div class="day-head">${esc(day)}</div><div class="entry-list">`;
+        html += `${lastDay ? "</div>" : ""}<h2 class="day-head">${esc(day)}</h2><div class="entry-list">`;
         lastDay = day;
       }
     }
     html += entryRow(entry);
   }
-  if (state.filter.sort === "time") html += "</div>";
-  else html = `<div class="entry-list">${html}</div>`;
-
-  const rest = list.length - page.length;
-  if (rest > 0) {
-    html += `<button class="btn ghost block" style="margin-top:12px" data-act="more">${t("log.more", {
-      n: Math.min(rest, PAGE_SIZE),
-    })}</button>`;
-  }
+  html += `</div><div class="row-between" style="margin-top:16px"><button class="btn ghost" data-act="previous" ${state.logPage === 0 ? "disabled" : ""}>${t("log.previous")}</button><span class="tiny">${t("log.page", { n: state.logPage + 1 })}</span><button class="btn ghost" data-act="more" ${state.logCursor ? "" : "disabled"}>${t("log.next")}</button></div>`;
   return html;
 }
 
@@ -650,6 +695,8 @@ function viewLog() {
       <button class="chip ${state.filter.unfilled ? "on" : ""}" data-act="unfilled">${t("log.unfilled")}</button>
     </div>
 
+    <p class="tiny">${t("log.retained")}</p>
+    <button class="chip ${state.filter.older ? "on" : ""}" data-act="older">${t("log.older")}</button>
     <div id="log-body">${entryListHtml(list)}</div>
   </div>`;
 }
@@ -679,13 +726,9 @@ function statTile(value, label) {
   return `<div class="stat"><div class="stat-value">${value}</div><div class="stat-label">${label}</div></div>`;
 }
 
-/* 每日最高强度走势：用已经在本地的记录算，不多发一次请求 */
+/* 每日最高强度由统计接口返回，避免只统计当前分页。 */
 function sparkline(days) {
-  const byDay = new Map();
-  for (const e of state.entries) {
-    if (!e.severity) continue;
-    byDay.set(e.local_date, Math.max(byDay.get(e.local_date) || 0, e.severity));
-  }
+  const byDay = new Map(Object.entries(state.stats?.daily_max || {}));
   if (!byDay.size) return "";
 
   /* 一天一格：有记录才画柱，没记录就留空。
@@ -694,7 +737,8 @@ function sparkline(days) {
   const cells = [];
   let hasData = false;
   for (let i = days - 1; i >= 0; i -= 1) {
-    const d = new Date(today.getTime() - i * 864e5);
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const sev = byDay.get(key) || 0;
     if (!sev) {
@@ -709,10 +753,11 @@ function sparkline(days) {
   }
   if (!hasData) return "";
 
-  const start = new Date(today.getTime() - (days - 1) * 864e5);
+  const start = new Date(today);
+  start.setDate(today.getDate() - days + 1);
   return `<div class="card stack gap-8">
     <div class="row-between">
-      <span class="eyebrow">${t("ins.spark")}</span>
+      <h2 class="eyebrow">${t("ins.spark")}</h2>
       <span class="tiny">${t("ins.spark_note")}</span>
     </div>
     <div class="spark">${cells.join("")}</div>
@@ -734,7 +779,7 @@ function distRow(d, maxCount) {
 
 function card(eyebrow, inner, extraClass = "") {
   return `<div class="card stack gap-12 ${extraClass}">
-    <span class="eyebrow">${eyebrow}</span>
+    <h2 class="eyebrow">${eyebrow}</h2>
     ${inner}
   </div>`;
 }
@@ -758,14 +803,15 @@ function basicBlock(stats) {
   </div>`;
 }
 
-function patternCard(p, sample = false, focus = false) {
+function patternCard(p, sample = false, focus = false, reminder = "") {
   const color = emotionMeta(p.dominant_emotion).color;
   const where = p.band
     ? getLang() === "zh"
       ? `${p.top_slot_label} ${p.band.start}—${p.band.end} 点`
       : `${p.top_slot_label} ${p.band.start}:00–${p.band.end}:00`
     : `${p.top_slot_label} · ${p.top_slot_range}`;
-  return `<div class="pattern" style="--acc:${color}">
+  return `<details class="pattern" style="--acc:${color}" ${sample ? "open" : ""}>
+    <summary><span>${esc(p.label)}</span><span class="tiny">${t("pattern.evidence", { n: p.count })}</span></summary>
     <div class="row-between">
       <span class="eyebrow">${esc(where)}</span>
       <span class="row" style="gap:6px">
@@ -775,11 +821,12 @@ function patternCard(p, sample = false, focus = false) {
       </span>
     </div>
     <p class="pattern-quote">${esc(p.text || "")}</p>
+    ${reminder ? `<p class="small">${esc(reminder)}</p>` : ""}
     <div class="pattern-foot">
       <span class="tag moss">${esc(p.dominant_emotion_label)}</span>
       ${p.kind_label ? `<span class="tag">${esc(p.kind_label)}</span>` : ""}
     </div>
-  </div>`;
+  </details>`;
 }
 
 function trendCard(trend) {
@@ -787,7 +834,7 @@ function trendCard(trend) {
   const delta = trend.delta > 0 ? `+${trend.delta}` : `${trend.delta}`;
   return `<div class="card stack gap-8">
     <div class="row-between">
-      <span class="eyebrow">${t("ins.trend")}</span>
+      <h2 class="eyebrow">${t("ins.trend")}</h2>
       <span class="delta-pill ${trend.direction}">${arrow} ${delta}</span>
     </div>
     <div class="row" style="gap:18px">
@@ -795,7 +842,7 @@ function trendCard(trend) {
         <span class="display sm" style="margin:0">${trend.this_week}</span>
         <span class="tiny">${t("ins.this_week")}</span>
       </div>
-      <div class="stack gap-4" style="opacity:.6">
+      <div class="stack gap-4">
         <span class="display sm" style="margin:0">${trend.last_week}</span>
         <span class="tiny">${t("ins.last_week")}</span>
       </div>
@@ -829,7 +876,7 @@ function sampleGate(sample) {
   const missing = sample ? sample.missing : 20;
   return `<div class="card stack gap-12">
     <div class="row-between">
-      <span class="eyebrow">${t("ins.patterns")}</span>
+      <h2 class="eyebrow">${t("ins.patterns")}</h2>
       <span class="tag warn">${t("ins.need_more", { n: missing })}</span>
     </div>
     <div class="progress-line"><i style="width:${Math.min(100, (have / min) * 100)}%"></i></div>
@@ -840,7 +887,7 @@ function sampleGate(sample) {
 
 function patternsHead() {
   return `<div class="row-between">
-    <span class="eyebrow">${t("ins.patterns")}</span>
+    <h2 class="eyebrow">${t("ins.patterns")}</h2>
     <span class="tiny">${t("ins.pattern_note")}</span>
   </div>`;
 }
@@ -853,7 +900,7 @@ function lockedBlock(patterns) {
     <div class="card sheen stack gap-12">
       <div class="row" style="gap:8px">
         <span class="lock-badge">PRO</span>
-        <span class="eyebrow">${t("ins.locked_title")}</span>
+        <h2 class="eyebrow">${t("ins.locked_title")}</h2>
       </div>
       <p class="small" style="color:var(--ink-2)">${t("ins.locked_body")}</p>
       <button class="btn block" data-act="paywall">${t("ins.unlock")}</button>
@@ -865,14 +912,14 @@ function lockedBlock(patterns) {
 
 function aiHeader(ins) {
   const ai = ins.ai || {};
-  const canRerun = !state.aiBusy && ai.status === "ready";
+  const canRerun = !state.aiBusy && ["ready", "pending"].includes(ai.status);
   return `<div class="row-between">
     <span class="row" style="gap:8px">
       <span class="ai-dot" aria-hidden="true"></span>
       <span class="eyebrow">${t("ai.badge")}</span>
       <span class="tiny">${esc(ai.model || "")}</span>
     </span>
-    ${canRerun ? `<button class="btn ghost sm" data-act="reanalyze">${t("ai.regenerate")}</button>` : ""}
+    ${canRerun ? `<button class="btn ghost sm" data-act="reanalyze">${t(ai.status === "pending" ? "ai.generate" : "ai.regenerate")}</button>` : ""}
   </div>`;
 }
 
@@ -895,6 +942,7 @@ function aiCard(ins) {
     </div>`;
   }
 
+  if (ai.status === "pending") return `<p class="small">${t("ai.manual")}</p><p class="tiny">${t("ai.privacy")}</p>`;
   if (ai.status === "error") {
     return `<div class="card flat stack gap-10">
       <div class="row-between">
@@ -910,8 +958,6 @@ function aiCard(ins) {
   /* off / insufficient 直接不出现：宁可少一块，也不给半成品 */
   if (ai.status !== "ready") return "";
 
-  const focus = ai.focus || {};
-  const focusPattern = patterns.find((p) => p.key === focus.key);
   const sample = ins.sample || {};
 
   return `<div class="card sheen stack gap-12">
@@ -920,15 +966,6 @@ function aiCard(ins) {
       <span class="tag moss">${t("ai.records", { n: sample.entries || 0 })}</span>
     </div>
     ${ai.headline ? `<p class="display sm" style="margin:0">${esc(ai.headline)}</p>` : ""}
-    ${ai.summary ? `<p class="body-lg">${esc(ai.summary)}</p>` : ""}
-    ${
-      focusPattern && focus.why
-        ? `<div class="ai-focus">
-            <span class="tag ai">${t("ai.focus")}</span>
-            <span class="small">${esc(focusPattern.label)} —— ${esc(focus.why)}</span>
-          </div>`
-        : ""
-    }
     ${
       ai.next_step
         ? `<div class="ai-next">
@@ -950,10 +987,9 @@ function proBlock(ins) {
   const showAi = !!ai.enabled && ai.status !== "pro";
   const focusKey = (ai.focus && ai.focus.key) || "";
   const body = patterns.length
-    ? `<div class="stack gap-12">${patterns.map((p) => patternCard(p, false, p.key === focusKey)).join("")}</div>`
+    ? `<div class="stack gap-12">${patterns.map((p, i) => patternCard(p, false, p.key === focusKey, (ins.reminders || [])[i] || "")).join("")}</div>`
     : `<div class="card flat"><p class="small">${t("ins.no_pattern")}</p></div>`;
   const efficacy = ins.efficacy || [];
-  const reminders = ins.reminders || [];
 
   return `<div class="stack gap-16">
     ${showAi ? `<div class="stack gap-10">${aiHeader(ins)}${aiCard(ins)}</div>` : ""}
@@ -961,7 +997,6 @@ function proBlock(ins) {
     ${ins.peak ? `<div class="card flat"><p class="body-lg">${esc(ins.peak.text)}</p></div>` : ""}
     ${ins.trend ? trendCard(ins.trend) : ""}
     ${efficacy.length ? card(t("ins.efficacy"), efficacy.map(efficacyRow).join("")) : ""}
-    ${reminders.length ? card(t("ins.reminders"), reminders.map(reminderRow).join("")) : ""}
   </div>`;
 }
 
@@ -970,10 +1005,7 @@ function viewInsights() {
   return `<div class="stack gap-16">
     <div class="row-between">
       <h1 class="display sm">${t("ins.title")}</h1>
-      <div class="chip-row">
-        <button class="chip ${state.insightsDays === 14 ? "on" : ""}" data-act="window" data-days="14">${t("ins.window14")}</button>
-        <button class="chip ${state.insightsDays === 30 ? "on" : ""}" data-act="window" data-days="30">${t("ins.window30")}</button>
-      </div>
+      <span class="chip on">${t("ins.window14")}</span>
     </div>
     ${
       !ins
@@ -984,10 +1016,10 @@ function viewInsights() {
           </div>`
         : `<div class="stack gap-24">
           <div class="stack gap-12">
-            <span class="eyebrow">${t("ins.basic")}</span>
+            <h2 class="eyebrow">${t("ins.basic")}</h2>
             ${basicBlock(state.stats)}
           </div>
-          ${proBlock(ins)}
+          ${ins.sample?.entries ? proBlock(ins) : `<div class="empty"><h2 class="display sm">${t("ins.empty_title")}</h2><p class="small">${t("ins.empty_body")}</p></div>`}
         </div>`
     }
   </div>`;
@@ -1003,7 +1035,7 @@ function viewMe() {
     <h1 class="display sm">${t("me.title")}</h1>
 
     <div class="card stack gap-8">
-      <span class="eyebrow">${t("me.account")}</span>
+      <h2 class="eyebrow">${t("me.account")}</h2>
       <div class="list-row">
         <div><div class="label">${esc(username)}</div></div>
       </div>
@@ -1025,7 +1057,7 @@ function viewMe() {
     </div>
 
     <div class="card stack gap-8">
-      <span class="eyebrow">${t("me.settings")}</span>
+      <h2 class="eyebrow">${t("me.settings")}</h2>
       <div class="list-row">
         <div><div class="label">${t("me.lang")}</div></div>
         <div class="chip-row">
@@ -1065,7 +1097,7 @@ function viewMe() {
     </div>
 
     <div class="card stack gap-8">
-      <span class="eyebrow">${t("me.data")}</span>
+      <h2 class="eyebrow">${t("me.data")}</h2>
       <button class="list-row" data-act="export" data-format="json">
         <div><div class="label">${t("me.export_json")}</div><div class="sub">${t("me.entry_count", { n: acc.entries ?? 0 })}</div></div>
         <span class="tiny">↓</span>
@@ -1074,6 +1106,8 @@ function viewMe() {
         <div><div class="label">${t("me.export_csv")}</div><div class="sub">UTF-8 · Excel</div></div>
         <span class="tiny">↓</span>
       </button>
+      <button class="list-row" data-act="import"><span class="label">${t("me.import_json")}</span><span class="tiny">↑</span></button>
+      <input id="import-file" type="file" accept="application/json,.json" hidden />
       <button class="list-row" data-act="seed">
         <div><div class="label">${t("me.seed")}</div><div class="sub">${t("me.entry_count", { n: 28 })}</div></div>
         <span class="tiny">→</span>
@@ -1090,9 +1124,9 @@ function viewMe() {
     </button>
 
     <div class="stack gap-4" style="padding:4px 4px 0">
-      <span class="eyebrow">${t("me.about")}</span>
+      <h2 class="eyebrow">${t("me.about")}</h2>
       <p class="small">${esc(state.meta ? state.meta.disclaimer : "")}</p>
-      <p class="tiny">${t("me.version")}</p>
+      <p class="tiny">${t("me.version", { version: state.meta?.version || "—" })}</p>
     </div>
   </div>`;
 }
@@ -1125,6 +1159,7 @@ function openOverlay(inner, { focus = true, label = "" } = {}) {
   overlay.setAttribute("aria-label", label || t("common.close"));
   overlay.innerHTML = inner;
   overlay.hidden = false;
+  $$("#view, .topbar, .tabbar").forEach((el) => { el.inert = true; });
   if (focus) focusFirst();
 }
 
@@ -1137,6 +1172,7 @@ function focusFirst() {
 }
 
 function destroyOverlay() {
+  iv.draft = null;
   iv.token += 1;
   iv.nodes = null;
   overlayInHistory = false;
@@ -1145,6 +1181,7 @@ function destroyOverlay() {
   overlay.removeAttribute("role");
   overlay.removeAttribute("aria-modal");
   overlay.removeAttribute("aria-label");
+  $$("#view, .topbar, .tabbar").forEach((el) => { el.inert = false; });
   document.body.classList.remove("locked");
   document.body.style.top = "";
   window.scrollTo(0, lockedScrollY);
@@ -1153,6 +1190,7 @@ function destroyOverlay() {
 }
 
 function closeOverlay() {
+  if (iv.saving) return;
   const popNeeded = overlayInHistory;
   destroyOverlay();
   if (popNeeded) {
@@ -1185,9 +1223,9 @@ function ensureConfirmLayer() {
   confirmLayer.hidden = true;
   confirmLayer.innerHTML = `
     <div class="confirm-veil" data-act="confirm-cancel"></div>
-    <div class="confirm-card" role="alertdialog" aria-modal="true">
-      <h2 class="confirm-title"></h2>
-      <p class="confirm-body small"></p>
+    <div class="confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+      <h2 class="confirm-title" id="confirm-title"></h2>
+      <p class="confirm-body small" id="confirm-body"></p>
       <div class="row" style="gap:10px;margin-top:18px">
         <button class="btn ghost block" data-act="confirm-cancel"></button>
         <button class="btn danger-solid block" data-act="confirm-ok"></button>
@@ -1204,6 +1242,7 @@ function settleConfirm(value) {
   document.documentElement.classList.remove("confirm-open");
   /* 解开底下那层的惰性，焦点还回去 */
   if (overlay) overlay.inert = false;
+  $$("#view, .topbar, .tabbar").forEach((el) => { el.inert = !overlay.hidden; });
   if (confirmRestoreFocus && document.contains(confirmRestoreFocus)) {
     confirmRestoreFocus.focus({ preventScroll: true });
   }
@@ -1229,6 +1268,7 @@ function askConfirm({ title, body = "", ok, cancel = t("common.cancel") }) {
   document.documentElement.classList.add("confirm-open");
   /* 底下那层设成 inert：它只是被盖住了，不该还能用 Tab 走到、也不该被回车误触 */
   if (!overlay.hidden) overlay.inert = true;
+  $$("#view, .topbar, .tabbar").forEach((el) => { el.inert = true; });
   /* 等一帧再聚焦：层刚显示出来时同步 focus 会被丢掉 */
   requestAnimationFrame(() => cancelBtn.focus({ preventScroll: true }));
   return new Promise((resolve) => {
@@ -1238,7 +1278,7 @@ function askConfirm({ title, body = "", ok, cancel = t("common.cancel") }) {
 
 /* ------------------------------------------------------------- 干预流程 */
 
-const iv = { entryId: null, data: null, step: 0, token: 0, relief: null, crisis: null, nodes: null, lastPct: -1 };
+const iv = { entryId: null, draft: null, saving: false, data: null, step: 0, token: 0, relief: null, crisis: null, nodes: null, lastPct: -1 };
 
 /* 建记录是写操作，必须防重入：网络慢的时候双击情绪瓦片会落下两条记录 */
 let picking = false;
@@ -1248,19 +1288,17 @@ async function pickEmotion(emotionKey, node) {
   picking = true;
   if (node) node.classList.add("pending");
   try {
-    const res = await api.createEntry({ emotion: emotionKey, tz_offset: tzOffset() });
-    state.entries.push(res.entry);
-    sortEntries();
-    state.total += 1;
-    invalidateInsights();
-    iv.entryId = res.entry.id;
-    iv.data = res.intervention;
+    const intervention = await api.intervention(emotionKey);
+    const clientId = crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(16)), (n) => n.toString(16).padStart(2, "0")).join("");
+    iv.draft = { emotion: emotionKey, tz_offset: tzOffset(), occurred_at: new Date().toISOString(), client_id: clientId };
+    iv.entryId = null;
+    iv.data = intervention;
     iv.step = -1; // -1 = 先说那一句话，再进步骤
     iv.relief = null;
     iv.crisis = null;
     renderStep();
     picking = false; // 浮层已经盖住瓦片，危机资源可以慢慢补
-    if (res.intervention.branch === "despair") {
+    if (intervention.branch === "despair") {
       // 危机资源异步补进来，但脚本第一步不等它
       try {
         iv.crisis = await api.crisis((state.account && state.account.region) || "CN");
@@ -1278,8 +1316,27 @@ async function pickEmotion(emotionKey, node) {
   }
 }
 
-function nextStep() {
+async function nextStep() {
+  if (iv.saving) return;
+  if (iv.entryId && !iv.draft) return;
+  iv.token += 1;
   iv.step += 1;
+  if (iv.step >= (iv.data.steps || []).length) {
+    iv.saving = true;
+    try {
+      const draft = iv.draft;
+      const result = await api.createEntry({ ...draft, intervention_completed: iv.data.branch !== "none" });
+      iv.entryId = result.entry.id;
+      iv.draft = null;
+      invalidateInsights();
+      state.logReady = false;
+      loadHome().then(render).catch(() => {});
+    } catch (err) {
+      iv.step -= 1;
+      toast(err.message);
+      return;
+    } finally { iv.saving = false; }
+  }
   renderStep();
 }
 
@@ -1310,6 +1367,7 @@ function renderSay() {
     </div>
     <div class="focus-foot stack gap-12">
       <button class="btn block" data-act="iv-next" data-autofocus>${t("iv.say_next")}</button>
+      <button class="btn ghost block" data-act="record-direct">${t("note.direct")}</button>
       <p class="focus-hint">${t("iv.key_hint")}</p>
     </div>
   </div>`, { label: `${meta.label} · ${data.say}` });
@@ -1481,6 +1539,11 @@ function crisisLines(lines) {
     .join("");
 }
 
+function emergencyLinks(data) {
+  if (data.region === "CN") return `<div class="stack gap-8"><a class="btn soft" href="tel:110">${t("crisis.police")}</a><a class="btn soft" href="tel:120">${t("crisis.ambulance")}</a></div>`;
+  return `<p class="small">${t("crisis.emergency")} · ${esc(data.emergency)}</p>`;
+}
+
 function crisisBlock() {
   if (!iv.crisis) {
     return `<div class="crisis-card stack gap-8" style="margin-top:16px">
@@ -1495,6 +1558,7 @@ function crisisBlock() {
       <span class="tag warn">${t("crisis.emergency")} ${esc(iv.crisis.emergency)}</span>
     </div>
     ${crisisLines(iv.crisis.lines)}
+    ${emergencyLinks(iv.crisis)}
     <p class="tiny" style="margin-top:10px">${esc(iv.crisis.free_note)}</p>
     <button class="btn ghost sm" data-act="open-crisis" style="margin-top:12px;width:100%">${t("iv.crisis_cta")}</button>
   </div>`;
@@ -1545,6 +1609,7 @@ async function setRelief(value) {
   $$(".chip[data-relief]", overlay).forEach((chip) => chip.classList.toggle("on", chip.dataset.relief === value));
   try {
     await api.recordIntervention(iv.entryId, { completed: true, relief: value });
+    invalidateInsights();
     const entry = state.entries.find((e) => e.id === iv.entryId);
     if (entry) {
       entry.relief = value;
@@ -1557,10 +1622,11 @@ async function setRelief(value) {
 
 /* ----------------------------------------------------------- 记录编辑表 */
 
-const sheet = { id: null, severity: null, fromIntervention: false };
+const sheet = { id: null, severity: null, fromIntervention: false, queue: false, isDraft: false };
 
 async function openEditSheet(entryId, fromIntervention = false) {
-  let entry = state.entries.find((e) => e.id === entryId);
+  sheet.isDraft = !entryId && !!iv.draft;
+  let entry = sheet.isDraft ? { ...iv.draft, id: null, severity: null, local_date: new Date(new Date(iv.draft.occurred_at).getTime() + iv.draft.tz_offset * 60000).toISOString().slice(0, 10) } : state.entries.find((e) => e.id === entryId);
   if (!entry) {
     try {
       entry = await api.entry(entryId);
@@ -1579,9 +1645,9 @@ async function openEditSheet(entryId, fromIntervention = false) {
     <div class="row-between" style="margin-bottom:16px">
       <div class="stack" style="gap:2px">
         <span class="eyebrow" style="color:${meta.color}">${esc(meta.label)}</span>
-        <span class="tiny">${fmtDay(entry.occurred_at)} ${fmtTime(entry.occurred_at)}</span>
+        <span class="tiny">${esc(entryTime(entry))} · UTC${entry.tz_offset >= 0 ? "+" : ""}${entry.tz_offset / 60}</span>
       </div>
-      ${sheetClose()}
+      <div class="row">${sheet.isDraft ? "" : `<button class="btn ghost sm delete-link" data-act="delete-entry" data-id="${entry.id}">${t("common.delete")}</button>`}${sheetClose()}</div>
     </div>
 
     <div class="stack gap-12" style="margin-bottom:18px">
@@ -1625,7 +1691,7 @@ async function openEditSheet(entryId, fromIntervention = false) {
 
     <div class="stack gap-8" style="margin-top:22px">
       <button class="btn block" data-act="save-note">${t("note.save")}</button>
-      <button class="btn danger sm" data-act="delete-entry" data-id="${entry.id}">${t("common.delete")}</button>
+      ${sheet.queue ? `<p class="tiny">${t("log.queue_hint")}</p>` : ""}
     </div>
   </div>`, { label: `${meta.label} · ${t("note.title")}` });
 }
@@ -1647,41 +1713,37 @@ async function saveNote() {
   if (button && button.classList.contains("busy")) return;
   const textarea = overlay.querySelector('[data-input="cause"]');
   const cause = textarea ? textarea.value.trim() : "";
+  if (sheet.isDraft && !cause && !sheet.severity) { toast(t("note.draft_required")); return; }
+  if (sheet.queue && (!cause || !sheet.severity)) { toast(t("log.complete_required")); return; }
   const payload = { cause };
   if (sheet.severity) payload.severity = sheet.severity;
   if (button) button.classList.add("busy");
+  if (sheet.isDraft) iv.saving = true;
   try {
-    const updated = await api.patchEntry(sheet.id, payload);
-    if (sheet.fromIntervention) {
-      try {
-        await api.recordIntervention(sheet.id, { completed: true, relief: iv.relief });
-      } catch {
-        /* 已记录过，忽略 */
-      }
-      /* PATCH 的返回值早于这次写入，干预状态得自己补上，
-      否则列表里的「干预完成」标签要等下一次全量拉取才出现。 */
-      updated.intervention_completed = true;
-      if (iv.relief) updated.relief = iv.relief;
-    }
+    const updated = sheet.isDraft ? (await api.createEntry({ ...iv.draft, ...payload })).entry : await api.patchEntry(sheet.id, payload);
+    if (sheet.isDraft) { iv.entryId = updated.id; iv.draft = null; sheet.isDraft = false; }
+    iv.saving = false;
     const index = state.entries.findIndex((e) => e.id === sheet.id);
     if (index >= 0) state.entries[index] = { ...state.entries[index], ...updated };
     sortEntries();
     invalidateInsights();
-    closeOverlay();
-    render();
+    const queue = sheet.queue;
+    if (!queue) closeOverlay();
+    await entriesChanged();
+    if (queue) await completeNext(sheet.id);
     toast(t("note.saved"));
     // 本地已经改好，不必再整表重拉；只有账号里的记录数需要跟进
     loadAccount().catch(() => {});
   } catch (err) {
     if (button) button.classList.remove("busy");
     toast(err.message);
-  }
+  } finally { iv.saving = false; }
 }
 
 /* --------------------------------------------------------------- 危机表 */
 
 async function openCrisis() {
-  const region = (state.account && state.account.region) || "US";
+  const region = (state.account && state.account.region) || (getLang() === "zh" ? "CN" : "US");
   openOverlay(`<div class="sheet center"><div class="stack gap-12">
     <div class="row-between"><h2 class="section-title">${t("crisis.title")}</h2>${sheetClose()}</div>
     <div class="skeleton" style="width:60%"></div>
@@ -1707,15 +1769,12 @@ async function openCrisis() {
       <p class="small" style="margin-bottom:14px">${t("crisis.sub")}</p>
       <div class="crisis-card">${crisisLines(data.lines)}</div>
       <div class="card flat" style="margin-top:14px">
-        <div class="row-between">
-          <span class="small">${t("crisis.emergency")}</span>
-          <span class="tag warn">${esc(data.emergency)}</span>
-        </div>
+        ${emergencyLinks(data)}
       </div>
       <a class="btn ghost block" style="margin-top:12px" href="https://findahelpline.com" target="_blank" rel="noopener">${t("crisis.find")} →</a>
       <p class="tiny" style="margin-top:14px">${t("crisis.note")}</p>
     </div>`,
-    { focus: false, label: `${t("crisis.title")} · ${data.label}` }
+    { focus: true, label: `${t("crisis.title")} · ${data.label}` }
   );
 }
 
@@ -1775,8 +1834,34 @@ function startVoice() {
 
 /* --------------------------------------------------------------- 动作 */
 
-async function doSeed() {
+let seeding = false;
+async function completeNext(skipId = null) {
+  const result = await api.entries({ ...state.filter, unfilled: true, limit: 40 });
+  const entry = result.items.find((item) => item.id !== skipId);
+  if (!entry) { sheet.queue = false; closeOverlay(); render(); return; }
+  sheet.queue = true;
+  await openEditSheet(entry.id);
+}
+
+async function importFile(file) {
+  if (!file) return;
   try {
+    if (file.size > 8 * 1024 * 1024) throw new Error(t("me.import_size"));
+    const data = JSON.parse(await file.text());
+    if (!Array.isArray(data.entries) || !data.entries.length || data.entries.length > 5000) throw new Error(t("me.import_invalid"));
+    if (!await askConfirm({ title: t("me.import_json"), body: t("me.import_confirm", { n: data.entries.length }), ok: t("me.import_json") })) return;
+    const result = await api.importEntries(data.entries);
+    await entriesChanged();
+    toast(t("me.import_done", { n: result.imported, skipped: result.skipped }));
+  } catch (err) { toast(err.message); }
+}
+
+async function doSeed() {
+  if (seeding) return;
+  seeding = true;
+  try {
+    const ok = await askConfirm({ title: t("me.seed"), body: t("me.seed_confirm"), ok: t("me.seed_add") });
+    if (!ok) return;
     const res = await api.seed(tzOffset());
     invalidateInsights();
     await refresh({ entries: true, account: true, insights: state.view === "insights" });
@@ -1784,7 +1869,7 @@ async function doSeed() {
     toast(`${t("me.seed_done")} · ${res.entries}`);
   } catch (err) {
     toast(err.message);
-  }
+  } finally { seeding = false; }
 }
 
 async function doReset() {
@@ -1816,6 +1901,7 @@ async function switchLang(lang) {
   setApiLang(lang);
   applyStaticText();
   applyTheme(); // 主题按钮的 aria-label 也要跟着换语言
+  if (!state.account) { renderAuth(); return; }
   try {
     await api.setSettings({ lang });
   } catch {
@@ -1846,7 +1932,7 @@ async function removeEntry(id) {
         state.total = Math.max(0, state.total - 1);
     invalidateInsights();
     closeOverlay();
-    render();
+    await entriesChanged();
     toast(t("common.deleted"));
     loadAccount().catch(() => {});
   } catch (err) {
@@ -1857,9 +1943,11 @@ async function removeEntry(id) {
 /* 关浮层：干预里写过的 relief / 强度都已经同步进 state.entries 了，
 所以这里只重绘 + 补一下账号里的记录数，不再整表重拉一遍。 */
 function closeAndSync() {
+  if (iv.saving) return;
+  sheet.queue = false;
   closeOverlay();
   render();
-  loadAccount().catch(() => {
+  if (state.account) loadAccount().catch(() => {
     /* 离线时保留本地状态 */
   });
 }
@@ -1874,8 +1962,9 @@ const ACTIONS = {
   "iv-skip": () => closeAndSync(),
   relief: (node) => setRelief(node.dataset.relief),
   note: () => openEditSheet(iv.entryId, true),
+  "record-direct": () => openEditSheet(null, true),
   close: () => closeAndSync(),
-  "edit-entry": (node) => openEditSheet(Number(node.dataset.id), false),
+  "edit-entry": (node) => { sheet.queue = false; return openEditSheet(Number(node.dataset.id), false); },
   sev: (node) => {
     sheet.severity = Number(node.dataset.sev);
     $$(".sev-opt", overlay).forEach((opt) => {
@@ -1902,37 +1991,21 @@ const ACTIONS = {
   "delete-entry": (node) => removeEntry(Number(node.dataset.id)),
   filter: (node) => {
     state.filter.emotion = node.dataset.emotion;
-    state.logLimit = PAGE_SIZE;
-    renderLogList();
+    return reloadLog();
   },
   sort: (node) => {
     state.filter.sort = node.dataset.sort;
-    state.logLimit = PAGE_SIZE;
-    renderLogList();
+    return reloadLog();
   },
   unfilled: () => {
     state.filter.unfilled = !state.filter.unfilled;
-    state.logLimit = PAGE_SIZE;
-    renderLogList();
+    return reloadLog();
   },
-  more: () => {
-    state.logLimit += PAGE_SIZE;
-    renderLogList();
-  },
-    window: async (node) => {
-    const days = Number(node.dataset.days);
-    if (days === state.insightsDays) return;
-    state.insightsDays = days;
-    invalidateInsights();
-    render();
-try {
-    // 返回 false 说明期间又切过一次窗口，这份结果已经作废
-      if (!(await loadInsights())) return;
-    } catch (err) {
-    toast(err.message);
-    }
-    render();
-  },
+  more: () => pageLog(true),
+  previous: () => pageLog(false),
+  older: async () => { state.filter.older = !state.filter.older; await loadEntries(); render(); },
+  "complete-next": () => completeNext(),
+  import: () => $("#import-file").click(),
   paywall: () => openRedeem(),
   wheel: () => openWheel(),
   "wheel-spin": () => spinWheel(),
@@ -1985,14 +2058,22 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const action = ACTIONS[node.dataset.act];
-  if (action) await action(node, event);
+  if (action) {
+    try { await action(node, event); } catch (err) { toast(err.message); }
+  }
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.name === 'new_password') {
+    const value = event.target.value;
+    const key = value.length < 8 ? 'auth.hint_pass' : value.length < 12 || new Set(value).size < 4 ? 'me.password_fair' : 'me.password_stronger';
+    $('#password-strength').textContent = t(key);
+  }
   if (event.target.matches('[data-input="cause"]')) syncCharCount();
 });
 
 document.addEventListener("change", async (event) => {
+  if (event.target.id === "import-file") { await importFile(event.target.files[0]); event.target.value = ""; return; }
   const node = event.target.closest("[data-act='region']");
   if (!node) return;
   try {
@@ -2311,6 +2392,7 @@ function renderAuth(mode = "login") {
   const view = $("#view");
   if (!view) return;
   view.innerHTML = `<div class="auth-wrap stack gap-16">
+    <div class="auth-brand"><span class="brand-name">Tether</span><p class="body-lg">${t("auth.slogan")}</p></div>
     <div class="stack gap-6" style="text-align:center">
       <h1 class="display sm" style="margin:0">${isLogin ? t("auth.login_title") : t("auth.register_title")}</h1>
       <p class="small">${t("auth.lede")}</p>
@@ -2324,14 +2406,18 @@ function renderAuth(mode = "login") {
       </label>
       <label class="stack gap-6">
         <span class="field-label">${t("auth.password")}</span>
-        <input type="password" name="password" autocomplete="${isLogin ? "current-password" : "new-password"}" required minlength="6" />
-        <span class="tiny">${t("auth.hint_pass")}</span>
+        <input type="password" name="password" autocomplete="${isLogin ? "current-password" : "new-password"}" required minlength="${isLogin ? 1 : 8}" maxlength="128" />
+        ${isLogin ? "" : `<span class="tiny">${t("auth.hint_pass")}</span>`}
       </label>
       <button class="btn block" type="submit">${isLogin ? t("auth.login") : t("auth.register")}</button>
     </form>
     <button class="btn ghost block" data-act="auth-mode" data-mode="${isLogin ? "register" : "login"}">
       ${isLogin ? t("auth.to_register") : t("auth.to_login")}
     </button>
+    <p class="tiny">${t("auth.privacy")}</p>
+    <details class="small"><summary>${t("auth.forgot")}</summary><p>${t("auth.forgot_help")}</p></details>
+    <button class="btn soft block" data-act="open-crisis">${t("crisis.title")}</button>
+    <div class="chip-row"><button class="chip" data-act="lang" data-lang="zh">中文</button><button class="chip" data-act="lang" data-lang="en">English</button></div>
   </div>`;
   const first = view.querySelector("[data-autofocus]");
   if (first) first.focus({ preventScroll: true });
@@ -2360,7 +2446,15 @@ document.addEventListener("submit", async (event) => {
 
 /* 会话在别的设备被踢掉、或过期时，任何一次请求都可能带回 401 */
 window.addEventListener("tether:unauthorized", () => {
-  if (!document.body.classList.contains("gated")) renderAuth();
+  state.account = null;
+  state.entries = [];
+  state.home = { items: [], watch: false, total: 0 };
+  state.logReady = false;
+  ++logSeq;
+  invalidateInsights();
+  iv.saving = false;
+  if (!overlay.hidden) closeOverlay();
+  renderAuth();
 });
 
 async function doLogout() {
@@ -2418,7 +2512,7 @@ function openRedeem() {
 function openPasswordSheet() {
   openOverlay(`<div class="sheet center">
     <div class="row-between" style="margin-bottom:6px">
-      <span class="eyebrow">${t("me.account")}</span>
+      <h2 class="eyebrow">${t("me.account")}</h2>
       ${sheetClose()}
     </div>
     <h2 class="display sm" style="margin-bottom:14px">${t("me.change_password")}</h2>
@@ -2429,7 +2523,12 @@ function openPasswordSheet() {
       </label>
       <label class="stack gap-6">
         <span class="field-label">${t("me.new_password")}</span>
-        <input type="password" name="new_password" autocomplete="new-password" />
+        <input type="password" name="new_password" autocomplete="new-password" minlength="8" maxlength="128" />
+        <span class="tiny" id="password-strength" aria-live="polite">${t("auth.hint_pass")}</span>
+      </label>
+      <label class="stack gap-6">
+        <span class="field-label">${t("me.confirm_password")}</span>
+        <input type="password" name="confirm_password" autocomplete="new-password" minlength="8" maxlength="128" />
       </label>
       <button class="btn block" data-act="password-submit">${t("me.change_password")}</button>
     </div>
@@ -2439,13 +2538,19 @@ function openPasswordSheet() {
 async function doChangePassword() {
   const oldPw = (overlay.querySelector('[name="old_password"]') || {}).value || "";
   const newPw = (overlay.querySelector('[name="new_password"]') || {}).value || "";
+  const confirmPw = overlay.querySelector('[name="confirm_password"]').value;
+  if (newPw !== confirmPw) { toast(t("me.password_mismatch")); return; }
+  if (newPw.length < 8 || newPw.length > 128) { toast(t("auth.hint_pass")); return; }
+  const button = overlay.querySelector('[data-act="password-submit"]');
+  if (button.disabled) return;
+  button.disabled = true;
   try {
     await api.changePassword(oldPw, newPw);
     closeOverlay();
     toast(t("me.password_done"));
   } catch (err) {
     toast(err.message);
-  }
+  } finally { button.disabled = false; }
 }
 
 /* --------------------------------------------------------------- 启动 */
@@ -2466,44 +2571,39 @@ async function boot() {
   applyTheme();
   render();
 
-  /* 先确认登录态。没登录就停在这里：不拉数据、不渲染外壳，
-     免得每个接口都 401 再各自弹一遍 toast。 */
   try {
-    const mine = await api.me();
-    state.account = mine.account;
-  } catch (err) {
-    /* 只有 401 才算「没登录」。连不上服务时不要把人推到登录页，
-       否则离线打开会看到一个莫名其妙的登录框。 */
-    if (err.status === 401) {
-      renderAuth();
-      return;
-    }
-  }
-
-  try {
-    await loadMeta();
-    if (state.meta && state.meta.lang && !storedLang && state.meta.lang !== initial) {
+    const payload = await api.bootstrap();
+    state.meta = payload.meta;
+    indexEmotions();
+    state.account = payload.account;
+    if (!payload.logged_in) { renderAuth(); return; }
+    document.body.classList.remove('gated');
+    state.home = payload.home;
+    state.total = payload.home.total;
+    $('#plan-chip').hidden = !state.account.pro;
+    $('#plan-chip').textContent = state.account.pro ? 'PRO' : '';
+    if (!storedLang && state.meta.lang !== initial) {
       setLang(state.meta.lang);
       setApiLang(state.meta.lang);
       applyStaticText();
       applyTheme();
       await loadMeta();
     }
+    const view = hashView();
+    history.replaceState({ view }, '', '#' + view);
+    setView(view, { scroll: 'none' });
+    await ensureViewData(view);
   } catch (err) {
-    $("#view").innerHTML = `<div class="empty stack gap-8" style="margin-top:40px">
-      <h2 class="display sm">${t("common.error")}</h2>
-      <p class="small">${esc(err.message)}</p>
-      <button class="btn soft sm" data-act="retry">${t("common.retry")}</button>
-    </div>`;
+    $('#view').innerHTML = '<div class="empty stack gap-8"><h1>' + t('common.error') + '</h1><p>' + esc(err.message) + '</p><button class="btn soft" data-act="retry">' + t('common.retry') + '</button></div>';
     ACTIONS.retry = () => location.reload();
-    return;
   }
-
-  const view = hashView();
-  history.replaceState({ view }, "", `#${view}`);
-  await refresh({ entries: true, account: true });
-  setView(view, { scroll: "none" });
-  await ensureViewData(view);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.account) ensureViewData(state.view);
+});
+setInterval(() => {
+  if (!document.hidden && state.account) ensureViewData(state.view);
+}, 60000);
 
 boot();

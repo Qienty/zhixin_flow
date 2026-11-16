@@ -10,12 +10,83 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from . import db
 
 SESSION_DAYS = 30
 COOKIE_NAME = "tether_sid"
+
+MIN_PASSWORD_LEN = 8
+
+# 最常被撞库的一批口令。不是完整字典，只拦「一眼就是弱口令」的那种。
+WEAK_PASSWORDS = frozenset(
+    {
+        "12345678", "123456789", "1234567890", "11111111", "00000000", "88888888",
+        "87654321", "password", "password1", "passw0rd", "qwertyui", "qwerty123",
+        "abc12345", "abcd1234", "iloveyou", "admin123", "woaini1314", "a1234567",
+    }
+)
+
+# 登录失败限速：同一账号 5 次、同一 IP 20 次（共享出口的网络不会被一个人锁死），
+# 滑动窗口 5 分钟。进程重启就清零——够挡在线爆破，不必再加一张表。
+LOGIN_WINDOW_SECONDS = 300
+LOGIN_FAIL_LIMITS = {"user": 5, "ip": 20}
+_login_fails: dict[str, list[float]] = {}
+_login_lock = threading.RLock()
+
+
+def check_password_strength(password: str, username: str = "") -> None:
+    if not isinstance(password, str) or len(password) > 128:
+        raise AuthError(422, "密码需要 8—128 个字符")
+    if len(password) < MIN_PASSWORD_LEN:
+        raise AuthError(422, f"密码至少 {MIN_PASSWORD_LEN} 位")
+    low = password.lower()
+    if low in WEAK_PASSWORDS or len(set(password)) == 1:
+        raise AuthError(422, "这个密码太常见了，换一个更难猜的")
+    if username and low == username.lower():
+        raise AuthError(422, "密码不能和用户名一样")
+
+
+def _login_keys(ip: str, username: str) -> list[tuple[str, str]]:
+    return [("user", f"user:{username.lower()[:64]}"), ("ip", f"ip:{ip}")]
+
+
+def login_throttle_check(ip: str, username: str) -> None:
+    """失败次数到上限就直接拒绝，连 scrypt 都不用算。"""
+    now = time.time()
+    with _login_lock:
+        for kind, key in _login_keys(ip, username):
+            stamps = [t for t in _login_fails.get(key, []) if now - t < LOGIN_WINDOW_SECONDS]
+            if stamps:
+                _login_fails[key] = stamps
+            else:
+                _login_fails.pop(key, None)
+            if len(stamps) >= LOGIN_FAIL_LIMITS[kind]:
+                wait = int(LOGIN_WINDOW_SECONDS - (now - stamps[0])) + 1
+                error = AuthError(429, f"尝试次数太多，请 {wait} 秒后再试")
+                error.retry_after = wait
+                raise error
+
+
+def login_failed(ip: str, username: str) -> None:
+    now = time.time()
+    with _login_lock:
+        if len(_login_fails) > 5000:  # 防止随机用户名把字典撑大
+            for key in [k for k, v in _login_fails.items() if not v or now - v[-1] >= LOGIN_WINDOW_SECONDS]:
+                del _login_fails[key]
+        for _, key in _login_keys(ip, username):
+            _login_fails.setdefault(key, []).append(now)
+
+
+def login_succeeded(ip: str, username: str) -> None:
+    """登录成功只清账号维度；IP 维度保留，免得有人拿自己的账号给别人刷新额度。"""
+    with _login_lock:
+        _login_fails.pop(f"user:{username.lower()[:64]}", None)
+
+
 
 # scrypt 参数：n=2^14 在普通机器上约 40—60ms，够挡住离线爆破又不至于让登录卡顿
 SCRYPT_N = 16384
@@ -82,8 +153,7 @@ def create_user(username: str, password: str) -> dict:
         raise AuthError(422, "用户名需要 2—24 个字符")
     if not all(c.isalnum() or c in "_-." for c in username):
         raise AuthError(422, "用户名只能用字母、数字、下划线、短横线和点")
-    if len(password) < 6:
-        raise AuthError(422, "密码至少 6 位")
+    check_password_strength(password, username)
 
     pass_hash, salt = hash_password(password)
     now = db.now_iso()
@@ -104,8 +174,7 @@ def create_user(username: str, password: str) -> dict:
 
 
 def set_password(user_id: int, new_password: str) -> None:
-    if len(new_password) < 6:
-        raise AuthError(422, "密码至少 6 位")
+    check_password_strength(new_password, (get_user(user_id) or {}).get("username", ""))
     pass_hash, salt = hash_password(new_password)
     conn = db.connect()
     try:
@@ -145,6 +214,27 @@ def authenticate(username: str, password: str) -> dict:
     if not row or not verify_password(password, row["pass_salt"], row["pass_hash"]):
         raise AuthError(401, "用户名或密码不对")
     return _row_to_user(row)
+
+
+def authenticate_limited(ip: str, username: str, password: str) -> dict:
+    # Reserve an attempt before hashing so concurrent requests cannot bypass the limit.
+    stamp = time.time()
+    with _login_lock:
+        login_throttle_check(ip, username)
+        for _, key in _login_keys(ip, username):
+            _login_fails.setdefault(key, []).append(stamp)
+        for key in list(_login_fails):
+            if not _login_fails[key] or stamp - _login_fails[key][-1] >= LOGIN_WINDOW_SECONDS:
+                del _login_fails[key]
+    user = authenticate(username, password)
+    with _login_lock:
+        for _, key in _login_keys(ip, username):
+            stamps = _login_fails.get(key, [])
+            if stamp in stamps:
+                stamps.remove(stamp)
+            if not stamps:
+                _login_fails.pop(key, None)
+    return user
 
 
 # --------------------------------------------------------------------------- #

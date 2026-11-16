@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import csv
+import base64
 import io
 import json
 import re
@@ -31,13 +32,14 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import ai, auth, content, db, insights, seed
+from . import __version__, ai, auth, content, db, insights, seed
 
 # 没有订阅、没有支付：Pro 只能靠兑换码开通（见 auth.redeem）
 
 # 不需要登录就能访问的接口。登录页要拿 meta 才能渲染情绪与地区；
 # 危机资源任何时候都该能打开，不能卡在登录后面。
-PUBLIC_PATHS = {"/api/health", "/api/meta", "/api/crisis"}
+PUBLIC_PATHS = {"/api/health", "/api/meta", "/api/crisis", "/api/bootstrap"}
+WINDOW_DAYS = 14
 
 
 # --------------------------------------------------------------------------- #
@@ -63,24 +65,30 @@ class Request:
         # 由 dispatch 填：当前登录用户 + 会话 token
         self.user: dict | None = None
         self.sid: str = ""
+        self.client_ip: str = "unknown"
 
     def q(self, key: str, default: str | None = None) -> str | None:
         values = self.query.get(key)
         return values[0] if values else default
 
-    def qi(self, key: str, default: int) -> int:
+    def qi(self, key: str, default: int, low: int | None = None, high: int | None = None) -> int:
         raw = self.q(key)
         if raw is None:
             return default
         try:
-            return int(raw)
+            value = int(raw)
         except ValueError:
-            return default
+            raise ApiError(400, f"{key} must be an integer")
+        if (low is not None and value < low) or (high is not None and value > high):
+            raise ApiError(400, f"{key} must be between {low} and {high}")
+        return value
 
     def qb(self, key: str, default: bool = False) -> bool:
         raw = self.q(key)
         if raw is None:
             return default
+        if raw.lower() not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
+            raise ApiError(400, f"{key} must be a boolean")
         return raw.lower() in ("1", "true", "yes", "on")
 
     @property
@@ -185,7 +193,31 @@ def _branch(emotion: str) -> str:
 def _clean_text(value: Any, limit: int) -> str:
     if value is None:
         return ""
-    return str(value).strip()[:limit]
+    if not isinstance(value, str) or len(value) > limit:
+        raise ApiError(400, f"text must be a string of at most {limit} characters")
+    return value.strip()
+
+
+def _clean_password(value: Any) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 128:
+        raise ApiError(400, "password must contain 1–128 characters")
+    return value
+
+
+def _offset(value: Any) -> int:
+    if type(value) is not int or not -840 <= value <= 840:
+        raise ApiError(400, "tz_offset is required: integer minutes between -840 and 840")
+    return value
+
+
+def _dates(req: Request, days: int = WINDOW_DAYS) -> tuple[str, str]:
+    offset = req.qi("tz_offset", 0, -840, 840)
+    today = db.now_utc().astimezone(timezone(timedelta(minutes=offset))).date()
+    return (today - timedelta(days=days - 1)).isoformat(), today.isoformat()
+
+
+def _fixed_window(req: Request) -> None:
+    req.qi("days", WINDOW_DAYS, WINDOW_DAYS, WINDOW_DAYS)
 
 
 def _severity(value: Any, *, required: bool = False) -> int | None:
@@ -193,10 +225,9 @@ def _severity(value: Any, *, required: bool = False) -> int | None:
         if required:
             raise ApiError(422, "severity is required")
         return None
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        raise ApiError(422, "severity must be an integer between 1 and 5")
+    if type(value) is not int:
+        raise ApiError(400, "severity must be an integer between 1 and 5")
+    number = value
     if not 1 <= number <= 5:
         raise ApiError(422, "severity must be between 1 and 5")
     return number
@@ -206,12 +237,12 @@ def _normalize_time(occurred_at: str | None, tz_offset: int) -> tuple[str, str, 
     if occurred_at:
         try:
             dt = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
-        except ValueError:
-            dt = db.now_utc()
+        except (ValueError, TypeError, AttributeError):
+            raise ApiError(400, "occurred_at must be an ISO 8601 timestamp with timezone")
     else:
         dt = db.now_utc()
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        raise ApiError(400, "occurred_at must include a timezone")
     local = dt.astimezone(timezone(timedelta(minutes=tz_offset)))
     return (
         dt.astimezone(timezone.utc).isoformat(timespec="seconds"),
@@ -220,9 +251,9 @@ def _normalize_time(occurred_at: str | None, tz_offset: int) -> tuple[str, str, 
     )
 
 
-def _insert_entry(row: dict, user_id: int) -> int:
+def _insert_entry(row: dict, user_id: int, connection=None) -> int:
     now = db.now_iso()
-    conn = _connect()
+    conn = connection or _connect()
     try:
         cur = conn.execute(
             """
@@ -249,15 +280,81 @@ def _insert_entry(row: dict, user_id: int) -> int:
                 now,
             ),
         )
-        conn.commit()
+        if connection is None:
+            conn.commit()
         return int(cur.lastrowid or 0)
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()
+
+
+def _entry_payload(body: dict) -> dict:
+    emotion = body.get("emotion")
+    if not isinstance(emotion, str) or emotion not in content.EMOTION_KEYS:
+        raise ApiError(400, "unknown emotion")
+    offset = _offset(body.get("tz_offset"))
+    occurred, local_date, local_hour = _normalize_time(body.get("occurred_at"), offset)
+    completed = body.get("intervention_completed", False)
+    relief = body.get("relief") or None
+    if type(completed) is not bool or relief not in (None, "better", "same", "worse"):
+        raise ApiError(400, "invalid intervention feedback")
+    return {"emotion": emotion, "severity": _severity(body.get("severity")),
+            "cause": _clean_text(body.get("cause"), 500), "note": _clean_text(body.get("note"), 1000),
+            "occurred_at": occurred, "local_date": local_date, "local_hour": local_hour,
+            "tz_offset": offset, "intervention_completed": completed, "relief": relief}
 
 
 # --------------------------------------------------------------------------- #
 # 元信息
 # --------------------------------------------------------------------------- #
+
+
+@router.route("GET", "/api/bootstrap")
+def bootstrap(req: Request):
+    payload = {"logged_in": bool(req.user), "meta": meta(req), "account": None}
+    if req.user:
+        payload["account"] = _account_payload(req.user)
+        payload["home"] = home(req)
+    return payload
+
+
+@router.route("GET", "/api/home")
+def home(req: Request):
+    since, today = _dates(req)
+    uid = req.user["id"]
+    watch = _rows("SELECT * FROM entries WHERE user_id = ? AND local_date BETWEEN ? AND ? AND severity >= 4 ORDER BY severity DESC, occurred_at DESC, id DESC LIMIT 3", [uid, since, today])
+    recent = _rows("SELECT * FROM entries WHERE user_id = ? ORDER BY occurred_at DESC, id DESC LIMIT 3", [uid])
+    total = _rows("SELECT COUNT(*) AS c FROM entries WHERE user_id = ?", [uid])[0]["c"]
+    return {"items": watch or recent, "watch": bool(watch), "total": total, "local_today": today}
+
+
+@router.route("POST", "/api/import")
+def import_entries(req: Request):
+    raw = req.json().get("entries")
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 5000:
+        raise ApiError(400, "entries must contain 1–5000 records")
+    rows = []
+    for entry in raw:
+        if not isinstance(entry, dict) or not entry.get("occurred_at"):
+            raise ApiError(400, "each entry requires occurred_at")
+        rows.append(_entry_payload(entry))
+    uid = req.user["id"]
+    conn = _connect()
+    added = 0
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for row in rows:
+            existing = conn.execute(
+                "SELECT id FROM entries WHERE user_id = ? AND occurred_at = ? AND emotion = ? AND severity IS ? AND cause = ? AND note = ? AND tz_offset = ? AND intervention_completed = ? AND relief IS ? LIMIT 1",
+                (uid, row["occurred_at"], row["emotion"], row["severity"], row["cause"], row["note"], row["tz_offset"], row["intervention_completed"], row["relief"]),
+            ).fetchone()
+            if not existing:
+                _insert_entry(row, uid, conn)
+                added += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return {"imported": added, "skipped": len(rows) - added}
 
 
 @router.route("GET", "/api/health")
@@ -268,6 +365,7 @@ def health(req: Request):
 @router.route("GET", "/api/meta")
 def meta(req: Request):
     payload = content.meta_payload(req.lang)
+    payload["version"] = __version__
     user = req.user
     payload["logged_in"] = bool(user)
     payload["plan"] = user["plan"] if user else "free"
@@ -289,28 +387,23 @@ def meta(req: Request):
 def create_entry(req: Request):
     body = req.json()
     uid = req.user["id"]
-    emotion = body.get("emotion")
-    if emotion not in content.EMOTION_KEYS:
-        raise ApiError(422, "unknown emotion")
-    occurred_at, local_date, local_hour = _normalize_time(
-        body.get("occurred_at"), int(body.get("tz_offset") or 0)
-    )
-    entry_id = _insert_entry(
-        {
-            "emotion": emotion,
-            "severity": _severity(body.get("severity")),
-            "cause": _clean_text(body.get("cause"), 500),
-            "note": _clean_text(body.get("note"), 1000),
-            "occurred_at": occurred_at,
-            "local_date": local_date,
-            "local_hour": local_hour,
-            "tz_offset": int(body.get("tz_offset") or 0),
-        },
-        uid,
-    )
+    row = _entry_payload(body)
+    client_id = _clean_text(body.get("client_id"), 64) or None
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute("SELECT id FROM entries WHERE user_id = ? AND client_id = ?", (uid, client_id)).fetchone() if client_id else None
+        if existing:
+            entry_id = existing["id"]
+        else:
+            entry_id = _insert_entry(row, uid, conn)
+            conn.execute("UPDATE entries SET client_id = ? WHERE id = ?", (client_id, entry_id))
+        conn.commit()
+    finally:
+        conn.close()
     return {
         "entry": _one(entry_id, uid),
-        "intervention": content.intervention_for(emotion, req.lang),
+        "intervention": content.intervention_for(row["emotion"], req.lang),
     }
 
 
@@ -320,36 +413,66 @@ def list_entries(req: Request):
     params: list = [req.user["id"]]
     emotion = req.q("emotion")
     if emotion and emotion != "all":
+        if emotion not in content.EMOTION_KEYS:
+            raise ApiError(400, "unknown emotion")
         where.append("emotion = ?")
         params.append(emotion)
-    days = req.qi("days", 0)
+    days = req.qi("days", 0, 0, 3650)
     if days:
-        where.append("occurred_at >= ?")
-        params.append((db.now_utc() - timedelta(days=days)).isoformat(timespec="seconds"))
-    q = (req.q("q") or "").strip()
+        since, today = _dates(req, days)
+        where.append("local_date BETWEEN ? AND ?")
+        params.extend([since, today])
+    if req.qb("older"):
+        since, _ = _dates(req)
+        where.append("local_date < ?")
+        params.append(since)
+    q = _clean_text(req.q("q"), 500)
     if q:
         where.append("(cause LIKE ? OR note LIKE ?)")
         params.extend([f"%{q}%", f"%{q}%"])
     if req.qb("unfilled"):
         where.append("(cause = '' OR severity IS NULL)")
+    sort = req.q("sort", "severity")
+    if sort not in ("severity", "time"):
+        raise ApiError(400, "sort must be severity or time")
+    order = "COALESCE(severity, 0) DESC, occurred_at DESC, id DESC" if sort == "severity" else "occurred_at DESC, id DESC"
+    limit = req.qi("limit", 40, 1, 100)
+    offset = req.qi("offset", 0, 0, 1000000)
     clause = " AND ".join(where)
-    order = (
-        "ORDER BY (severity IS NULL), severity DESC, occurred_at DESC"
-        if (req.q("sort") or "severity") == "severity"
-        else "ORDER BY occurred_at DESC"
-    )
-    limit = max(1, min(req.qi("limit", 200), 1000))
-    offset = max(0, req.qi("offset", 0))
     conn = _connect()
     try:
         total = conn.execute(f"SELECT COUNT(*) AS c FROM entries WHERE {clause}", params).fetchone()["c"]
-        rows = conn.execute(
-            f"SELECT * FROM entries WHERE {clause} {order} LIMIT ? OFFSET ?",
-            params + [limit, offset],
-        ).fetchall()
+        cursor = req.q("cursor")
+        if cursor:
+            try:
+                decoded = json.loads(base64.urlsafe_b64decode(cursor).decode())
+                if decoded["sort"] != sort:
+                    raise ValueError()
+                anchor = decoded["anchor"]
+                if not isinstance(anchor, list) or len(anchor) != (3 if sort == "severity" else 2):
+                    raise ValueError()
+                if not isinstance(anchor[-2], str) or type(anchor[-1]) is not int:
+                    raise ValueError()
+                if sort == "severity" and (type(anchor[0]) is not int or not 0 <= anchor[0] <= 5):
+                    raise ValueError()
+            except (ValueError, KeyError, TypeError, UnicodeError):
+                raise ApiError(400, "invalid cursor")
+            fields = "(COALESCE(severity, 0), occurred_at, id)" if sort == "severity" else "(occurred_at, id)"
+            where.append(f"{fields} < ({', '.join('?' for _ in anchor)})")
+            params.extend(anchor)
+            offset = 0
+        clause = " AND ".join(where)
+        rows = conn.execute(f"SELECT * FROM entries WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?", params + [limit + 1, offset]).fetchall()
     finally:
         conn.close()
-    return {"items": [db.row_to_dict(r) for r in rows], "total": total}
+    more = len(rows) > limit
+    items = [db.row_to_dict(r) for r in rows[:limit]]
+    next_cursor = None
+    if more:
+        last = items[-1]
+        anchor = ([last["severity"] or 0] if sort == "severity" else []) + [last["occurred_at"], last["id"]]
+        next_cursor = base64.urlsafe_b64encode(json.dumps({"sort": sort, "anchor": anchor}).encode()).decode()
+    return {"items": items, "total": total, "next_cursor": next_cursor}
 
 
 @router.route("DELETE", "/api/entries")
@@ -456,23 +579,31 @@ def record_intervention(req: Request):
 
 @router.route("GET", "/api/stats/basic")
 def stats_basic(req: Request):
-    days = max(1, min(req.qi("days", 30), 3650))
-    since = (db.now_utc() - timedelta(days=days)).isoformat(timespec="seconds")
-    entries = _rows(
-        "SELECT * FROM entries WHERE user_id = ? AND occurred_at >= ? ORDER BY occurred_at",
-        [req.user["id"], since],
-    )
+    _fixed_window(req)
+    entries = _window_entries(req)
     payload = insights.build_basic(entries, req.lang)
-    payload["window_days"] = days
+    payload["window_days"] = WINDOW_DAYS
+    daily = {}
+    for entry in entries:
+        if entry["severity"]:
+            daily[entry["local_date"]] = max(daily.get(entry["local_date"], 0), entry["severity"])
+    payload["daily_max"] = daily
     return payload
 
 
-def _window_entries(days: int, user_id: int) -> list[dict]:
-    since = (db.now_utc() - timedelta(days=days)).isoformat(timespec="seconds")
-    return _rows(
-        "SELECT * FROM entries WHERE user_id = ? AND occurred_at >= ? ORDER BY occurred_at",
-        [user_id, since],
+def _window_entries(req: Request) -> list[dict]:
+    since, today = _dates(req)
+    entries = _rows(
+        "SELECT * FROM entries WHERE user_id = ? AND local_date BETWEEN ? AND ? ORDER BY occurred_at",
+        [req.user["id"], since, today],
     )
+    for entry in entries:
+        entry["_window_today"] = today
+    return entries
+
+
+def _rules(req: Request, entries: list[dict], locked: bool) -> dict:
+    return insights.build_insights(entries, WINDOW_DAYS, req.lang, locked=locked, today=_dates(req)[1])
 
 
 def _redact(text: str) -> str:
@@ -487,7 +618,7 @@ def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str)
       pro           免费层没有这项
       off           没配 key —— 全站静默用规则版
       insufficient  样本不够，先别硬凑结论
-      pending       有数据但还没分析过，前端接着调 /api/insights/analyze
+      pending       有数据但还没分析过，等待用户主动点击分析
       ready         正文已由模型改写（这里已经把文案合并进 rules 了）
     """
     cfg = ai.config()
@@ -522,10 +653,11 @@ def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str)
 
 @router.route("GET", "/api/insights")
 def get_insights(req: Request):
-    days = max(1, min(req.qi("days", 14), 3650))
+    _fixed_window(req)
+    days = WINDOW_DAYS
     plan = req.user["plan"]
-    entries = _window_entries(days, req.user["id"])
-    payload = insights.build_insights(entries, days, req.lang, locked=(plan != "pro"))
+    entries = _window_entries(req)
+    payload = _rules(req, entries, locked=(plan != "pro"))
     payload["ai"] = _ai_state(entries, days, req.lang, payload, plan)
     return payload
 
@@ -546,16 +678,15 @@ def analyze_insights(req: Request):
         raise ApiError(503, "还没有配置 AI key：把 TETHER_AI_API_KEY 写进 .env")
 
     body = req.json()
-    try:
-        days = int(body.get("days") or 14)
-    except (TypeError, ValueError):
-        days = 14
-    days = max(1, min(days, 3650))
+    _fixed_window(req)
+    if "days" in body and (type(body["days"]) is not int or body["days"] != WINDOW_DAYS):
+        raise ApiError(400, "days must be 14")
+    days = WINDOW_DAYS
     force = bool(body.get("force"))
     lang = req.lang
 
-    entries = _window_entries(days, req.user["id"])
-    rules = insights.build_insights(entries, days, lang, locked=False)
+    entries = _window_entries(req)
+    rules = _rules(req, entries, locked=False)
 
     if len(entries) < insights.MIN_SAMPLE:
         rules["ai"] = {
@@ -635,14 +766,16 @@ def _session_response(user: dict) -> Response:
 @router.route("POST", "/api/auth/register")
 def register(req: Request):
     body = req.json()
-    user = auth.create_user((body.get("username") or "").strip(), body.get("password") or "")
+    user = auth.create_user(_clean_text(body.get("username"), 24), _clean_password(body.get("password")))
     return _session_response(user)
 
 
 @router.route("POST", "/api/auth/login")
 def login(req: Request):
     body = req.json()
-    user = auth.authenticate((body.get("username") or "").strip(), body.get("password") or "")
+    username = _clean_text(body.get("username"), 24)
+    password = _clean_password(body.get("password"))
+    user = auth.authenticate_limited(req.client_ip, username, password)
     return _session_response(user)
 
 
@@ -658,16 +791,18 @@ def logout(req: Request):
 @router.route("GET", "/api/auth/me")
 def whoami(req: Request):
     if not req.user:
-        raise ApiError(401, "login required")
-    return {"account": _account_payload(req.user)}
+        return {"logged_in": False, "account": None}
+    return {"logged_in": True, "account": _account_payload(req.user)}
 
 
 @router.route("POST", "/api/auth/password")
 def change_password(req: Request):
+    if not req.user:
+        raise ApiError(401, "login required")
     body = req.json()
     old = body.get("old_password") or ""
     new = body.get("new_password") or ""
-    auth.authenticate(req.user["username"], old)
+    auth.authenticate_limited(req.client_ip, req.user["username"], _clean_password(old))
     auth.set_password(req.user["id"], new)
     # 改密码会踢掉所有会话，这里立刻补一个新的，免得自己被登出
     return _session_response(req.user)
@@ -785,6 +920,10 @@ def put_wheel(req: Request):
 # --------------------------------------------------------------------------- #
 
 
+def _csv_cell(value: str) -> str:
+    return "'" + value if value and (value.lstrip().startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n"))) else value
+
+
 @router.route("GET", "/api/export")
 def export(req: Request):
     rows = _rows(
@@ -805,8 +944,8 @@ def export(req: Request):
                     r["local_hour"],
                     r["emotion"],
                     r["severity"] if r["severity"] is not None else "",
-                    r["cause"],
-                    r["note"],
+                    _csv_cell(r["cause"]),
+                    _csv_cell(r["note"]),
                     r["relief"] or "",
                 ]
             )
@@ -828,18 +967,18 @@ def export(req: Request):
 
 @router.route("POST", "/api/demo/seed")
 def demo_seed(req: Request):
-    tz_offset = max(-840, min(req.qi("tz_offset", 480), 840))
-    reset = req.qb("reset", True)
+    tz_offset = req.qi("tz_offset", 480, -840, 840)
+    reset = req.qb("reset", False)
+    if reset:
+        raise ApiError(400, "演示数据只能追加；清空记录请使用单独的清空功能")
     uid = req.user["id"]
     conn = _connect()
     try:
-        if reset:
-            conn.execute("DELETE FROM entries WHERE user_id = ?", (uid,))
+        for row in seed.build_rows(tz_offset):
+            _insert_entry(row, uid, conn)
         conn.commit()
     finally:
         conn.close()
-    for row in seed.build_rows(tz_offset):
-        _insert_entry(row, uid)
     total = _rows("SELECT COUNT(*) AS c FROM entries WHERE user_id = ?", [uid])[0]["c"]
     return {"seeded": True, "entries": total}
 
@@ -860,6 +999,7 @@ def _cookie(req: Request, name: str) -> str:
 
 def dispatch(req: Request) -> Response:
     try:
+        handler, params = router.match(req.method, req.path)
         # 先把会话解出来：公开接口也想知道「谁在访问」（比如 meta 要回该用户的 plan）
         req.sid = _cookie(req, auth.COOKIE_NAME)
         req.user = auth.user_by_token(req.sid)
@@ -868,7 +1008,6 @@ def dispatch(req: Request) -> Response:
         if not public and not req.user:
             raise ApiError(401, "login required")
 
-        handler, params = router.match(req.method, req.path)
         req.params = params
         result = handler(req)
         if isinstance(result, Response):
@@ -877,7 +1016,8 @@ def dispatch(req: Request) -> Response:
     except ApiError as exc:
         return Response(status=exc.status, payload={"error": exc.message})
     except auth.AuthError as exc:
-        return Response(status=exc.status, payload={"error": exc.message})
+        headers = {"Retry-After": str(exc.retry_after)} if hasattr(exc, "retry_after") else {}
+        return Response(status=exc.status, payload={"error": exc.message}, headers=headers)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         return Response(status=500, payload={"error": "internal server error"})

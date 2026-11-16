@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import os
 import posixpath
@@ -21,7 +22,7 @@ ROOT = Path(__file__).resolve().parent
 FRONTEND = ROOT.parent / "frontend"
 sys.path.insert(0, str(ROOT))
 
-from app import db  # noqa: E402
+from app import db, __version__  # noqa: E402
 from app.api import Request, Response, dispatch, parse_query  # noqa: E402
 
 mimetypes.add_type("application/javascript; charset=utf-8", ".js")
@@ -31,11 +32,14 @@ mimetypes.add_type("application/json; charset=utf-8", ".json")
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Tether/1.0"
+    server_version = f"Tether/{__version__}"
     protocol_version = "HTTP/1.1"
 
     # -- 入口 --------------------------------------------------------------
     def do_GET(self) -> None:
+        self._handle("GET")
+
+    def do_HEAD(self) -> None:
         self._handle("GET")
 
     def do_POST(self) -> None:
@@ -51,16 +55,15 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("DELETE")
 
     def do_OPTIONS(self) -> None:
-        self.send_response(204)
-        self._cors()
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self._dev_page = False
+        self._send(204, b"", "text/plain; charset=utf-8")
 
     # -- 核心 --------------------------------------------------------------
     def _handle(self, method: str) -> None:
+        self._dev_page = False
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
-        if path.startswith("/api/"):
+        if path == "/api" or path.startswith("/api/"):
             self._handle_api(method, path, parsed.query)
         elif method == "GET":
             self._serve_static(path)
@@ -68,11 +71,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(405, b"method not allowed", "text/plain; charset=utf-8")
 
     def _handle_api(self, method: str, path: str, query: str) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > 8 * 1024 * 1024:
+                raise ValueError()
+        except ValueError:
+            self.close_connection = True
+            self._send(413, b'{"error":"body must be at most 8 MiB"}', "application/json")
+            return
         body = self.rfile.read(length) if length else b""
         headers = {k.lower(): v for k, v in self.headers.items()}
         req = Request(method, path, parse_query(query), body, headers)
+        req.client_ip = self.client_address[0]
+        # Trust only a proxy explicitly configured by the operator.
+        trusted = {ip.strip() for ip in os.environ.get("TETHER_TRUSTED_PROXIES", "").split(",") if ip.strip()}
+        if req.client_ip in trusted:
+            req.client_ip = self.headers.get("X-Real-IP") or req.client_ip
+        else:
+            req.headers.pop("x-forwarded-proto", None)
         result = dispatch(req)
+        result.headers["Cache-Control"] = "no-store"
+        if "Set-Cookie" in result.headers and req.headers.get("x-forwarded-proto", "").lower() == "https":
+            result.headers["Set-Cookie"] += "; Secure"
         if result.raw is not None:
             data = result.raw.encode("utf-8") if isinstance(result.raw, str) else result.raw
         else:
@@ -92,18 +112,25 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, b"forbidden", "text/plain; charset=utf-8")
             return
         if not target.is_file():
-            index = FRONTEND / "index.html"
-            if index.is_file():
-                target = index  # 单页应用回退
-            else:
-                self._send(404, b"not found", "text/plain; charset=utf-8")
-                return
+            self._send(404, "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>404 · Tether</title><h1>页面不存在 / Page not found</h1><p>请检查地址，或使用浏览器返回上一页。</p></html>".encode("utf-8"), "text/html; charset=utf-8")
+            return
+        self._dev_page = target.name.startswith("__") and os.environ.get("TETHER_DEV_PAGES") == "1"
+        if target.name.startswith("__") and not self._dev_page:
+            self._send(404, b"not found", "text/plain")
+            return
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         try:
             data = target.read_bytes()
         except OSError:
             self._send(500, b"read error", "text/plain; charset=utf-8")
             return
+        if target.name == "sw.js":
+            digest = hashlib.sha256()
+            for asset in sorted(FRONTEND.rglob("*")):
+                if asset.is_file() and not asset.name.startswith("__"):
+                    digest.update(asset.relative_to(FRONTEND).as_posix().encode())
+                    digest.update(asset.read_bytes())
+            data = data.replace(b"__ASSET_HASH__", digest.hexdigest()[:16].encode())
         self._send(200, data, ctype, {"Cache-Control": "no-cache"})
 
     # -- 输出 --------------------------------------------------------------
@@ -120,15 +147,45 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+    # 浏览器侧的基础防护。应用没有任何第三方脚本 / 字体 / 接口，所以 CSP 只放行同源；
+    # style 要 'unsafe-inline'，是因为渲染时大量写了 style="--emo:…" 这类行内变量。
+    SECURITY_HEADERS = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "SAMEORIGIN",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
+    }
+    _dev_page = False  # 以 __ 开头的开发测试页带内联脚本，单独放宽 script-src
+
+    def _csp(self) -> str:
+        scripts = "'self' 'unsafe-inline'" if self._dev_page else "'self'"
+        return (
+            f"default-src 'self'; script-src {scripts}; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; base-uri 'self'; "
+            "form-action 'self'; frame-ancestors 'self'"
+        )
+
     def _send(self, status: int, data: bytes, ctype: str, headers: dict[str, str] | None = None) -> None:
+        # 文本类型没写 charset 的补上 utf-8：只靠 <meta charset> 兜底，
+        # 非浏览器客户端会按 latin-1 解出乱码
+        if ctype.startswith("text/") and "charset" not in ctype:
+            ctype += "; charset=utf-8"
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self._cors()
+        for key, value in self.SECURITY_HEADERS.items():
+            self.send_header(key, value)
+        self.send_header("Content-Security-Policy", self._csp())
+        # HSTS 只在原始请求是 https 时才发（前面的 Nginx 会带 X-Forwarded-Proto）：
+        # 明文 HTTP 上发这个头没有意义
+        trusted = {ip.strip() for ip in os.environ.get("TETHER_TRUSTED_PROXIES", "").split(",") if ip.strip()}
+        if self.client_address[0] in trusted and (self.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https":
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
-        if data:
+        if data and self.command != "HEAD":
             self.wfile.write(data)
 
     def log_message(self, fmt: str, *args) -> None:  # 精简日志

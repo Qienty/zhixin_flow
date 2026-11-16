@@ -455,7 +455,7 @@ def build_basic(entries: list[dict], lang: str) -> dict:
     }
 
 
-def build_insights(entries: list[dict], days: int, lang: str, locked: bool) -> dict:
+def build_insights(entries: list[dict], days: int, lang: str, locked: bool, today: str | None = None) -> dict:
     basic = build_basic(entries, lang)
     now = datetime.now(timezone.utc)
 
@@ -495,16 +495,14 @@ def build_insights(entries: list[dict], days: int, lang: str, locked: bool) -> d
 
     # 趋势：近 7 天 vs 前 7 天
     trend = None
-    cutoff = now - timedelta(days=7)
-    recent = [e["severity"] for e in entries if e.get("severity") and _parse(e["occurred_at"]) >= cutoff]
-    earlier = [
-        e["severity"]
-        for e in entries
-        if e.get("severity") and cutoff > _parse(e["occurred_at"]) >= cutoff - timedelta(days=7)
-    ]
+    local_today = datetime.fromisoformat(today).date() if today else now.date()
+    cutoff = (local_today - timedelta(days=6)).isoformat()
+    since = (local_today - timedelta(days=13)).isoformat()
+    recent = [e["severity"] for e in entries if e.get("severity") and cutoff <= e["local_date"] <= local_today.isoformat()]
+    earlier = [e["severity"] for e in entries if e.get("severity") and since <= e["local_date"] < cutoff]
     if len(recent) >= 2 and len(earlier) >= 2:
-        a = sum(recent) / len(recent)
-        b = sum(earlier) / len(earlier)
+        a = round(sum(recent) / len(recent), 1)
+        b = round(sum(earlier) / len(earlier), 1)
         delta = round(a - b, 1)
         if delta <= -0.3:
             direction = "down"

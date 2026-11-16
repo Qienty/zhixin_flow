@@ -4,6 +4,10 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.runtime/
+.cache/
+backend/data/*.db-wal
+backend/data/*.db-shm
 
 # 运行时数据（首次启动自动生成，删掉即重置）
 backend/data/*.db

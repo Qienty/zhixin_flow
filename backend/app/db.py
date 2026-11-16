@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import pathlib
+import os
 import sqlite3
 from datetime import datetime, timezone
 
-DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = pathlib.Path(os.environ.get("TETHER_DATA_DIR") or pathlib.Path(__file__).resolve().parent.parent / "data")
 DB_PATH = DATA_DIR / "tether.db"
 
 SCHEMA = """
@@ -147,6 +148,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "user_id" not in _columns(conn, "entries"):
         conn.execute("ALTER TABLE entries ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_user ON entries(user_id)")
+    if "client_id" not in _columns(conn, "entries"):
+        conn.execute("ALTER TABLE entries ADD COLUMN client_id TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_client ON entries(user_id, client_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_local ON entries(user_id, local_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_time ON entries(user_id, occurred_at DESC, id DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_rank ON entries(user_id, COALESCE(severity, 0) DESC, occurred_at DESC, id DESC)")
 
 
 def get_setting(key: str, default: str = "") -> str:

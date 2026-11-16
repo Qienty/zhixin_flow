@@ -461,8 +461,7 @@ def merge(payload: dict, narrative: dict) -> dict:
         if target is not None:
             target["text"] = item["text"]
 
-    if payload.get("trend") and narrative.get("trend_text"):
-        payload["trend"]["text"] = narrative["trend_text"]
+    # Trend values and text are computed together; model prose cannot replace them.
     if payload.get("peak") and narrative.get("peak_text"):
         payload["peak"]["text"] = narrative["peak_text"]
 
@@ -472,19 +471,23 @@ def merge(payload: dict, narrative: dict) -> dict:
         if target is not None:
             target["text"] = item["text"]
 
-    if narrative.get("reminders"):
-        payload["reminders"] = narrative["reminders"]
+    # Keep reminders in rule-pattern order so each expanded card gets its own action.
     return payload
+
+
+def rules_day(entries: list[dict]) -> str:
+    # The API adds the viewer's calendar day to every row for daily trend invalidation.
+    return entries[0].get("_window_today", "") if entries else ""
 
 
 def fingerprint(entries: list[dict], days: int, lang: str, model: str) -> str:
     """数据指纹：记录、窗口或语言任一变化就换一份缓存。"""
-    digest = hashlib.sha1(f"{days}|{lang}|{model}".encode())
+    digest = hashlib.sha256(f"local-window-v3|{lang}|{model}|{rules_day(entries)}".encode())
     for entry in sorted(entries, key=lambda e: e["id"]):
         digest.update(
-            "|".join(
-                str(entry.get(field) or "")
-                for field in ("id", "occurred_at", "emotion", "severity", "local_hour", "cause", "note", "relief")
+            json.dumps(
+                [entry.get(field) for field in ("id", "user_id", "occurred_at", "local_date", "emotion", "severity", "local_hour", "cause", "note", "relief", "intervention_completed")],
+                ensure_ascii=False, separators=(",", ":"),
             ).encode()
         )
         digest.update(b";")

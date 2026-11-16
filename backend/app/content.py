@@ -28,7 +28,7 @@ EMOTIONS = [
     {
         "key": "sadness",
         "zh": {"label": "伤心", "hint": "想缩起来"},
-        "en": {"label": "Sad", "hint": "small, withdrawn"},
+        "en": {"label": "Sad", "hint": "low and withdrawn"},
         "say": {
             "zh": "不用解释。手放这儿，待一会儿。",
             "en": "No need to explain. Hand here. Stay a while.",
@@ -363,11 +363,11 @@ INTERVENTIONS = {
 BRANCH_HINT = {
     "anger": {
         "zh": "愤怒分支 · 30 秒降唤醒",
-        "en": "anger branch · 30s down-shift",
+        "en": "Anger · pause and breathe",
     },
     "sadness": {
         "zh": "伤心分支 · 陪伴 + 身体动作",
-        "en": "sadness branch · company + body",
+        "en": "Sadness · a moment of comfort",
     },
     "despair": {
         "zh": "托底分支 · 危机资源免费",

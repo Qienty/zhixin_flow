@@ -13,8 +13,8 @@
   --surface-soft: #fbfaf6;
   --ink: #1b211d;
   --ink-2: #48524b;
-  --muted: #7b837b;
-  --faint: #a6aca4;
+  --muted: #626b62;
+  --faint: #626b62;
   --line: #e5e0d4;
   --line-strong: #d3ccbb;
 
@@ -66,8 +66,8 @@
   --surface-soft: #191e1b;
   --ink: #e9e7df;
   --ink-2: #b4bab2;
-  --muted: #8b928a;
-  --faint: #6c736b;
+  --muted: #a4aea2;
+  --faint: #a4aea2;
   --line: #2c332d;
   --line-strong: #3d453e;
 
@@ -1099,3 +1099,19 @@ body.gated .view {
   color: var(--brick);
   border-color: color-mix(in srgb, var(--brick) 35%, transparent);
 }
+
+/* Audit: readable small text, touch targets and compact evidence. */
+.eyebrow { margin: 0; font-weight: 600; }
+.icon-btn { width:44px; height:44px; }
+.btn.sm, .chip, .emo-secondary .emo-tile, .mic-btn, .wheel-del { min-height:44px; min-width:44px; }
+.emo-tile .emo-hint, .emo-tile .emo-branch { color:var(--ink-2); opacity:1; font-size:11.5px; }
+.day-head { position:sticky; top:56px; z-index:5; padding:12px 0; margin:0; background:var(--paper); font-size:13px; color:var(--ink-2); }
+#log-body { scroll-margin-top:64px; }
+.pattern summary { display:flex; justify-content:space-between; gap:12px; cursor:pointer; min-height:44px; align-items:center; font-weight:600; }
+.pattern[open] summary { margin-bottom:12px; }
+.onboarding { text-align:left; margin:0; padding-left:24px; line-height:2; }
+.auth-brand { text-align:center; padding:12px 0; }
+.auth-brand .brand-name { font-size:32px; color:var(--moss); }
+.auth-wrap summary { min-height:44px; cursor:pointer; display:flex; align-items:center; }
+.delete-link { color:var(--muted); text-decoration:underline; }
+button:disabled { cursor:default; opacity:.55; }
