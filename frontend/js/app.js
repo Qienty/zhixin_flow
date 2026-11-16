@@ -22,6 +22,12 @@ const SEV_LABEL = {
 
 const VIEWS = ["now", "log", "insights", "me"];
 const PAGE_SIZE = 40;
+const REFRESH_AGE_MS = 30000;
+const loadedAt = { now: 0, log: 0, insights: 0, me: 0 };
+const viewRefreshes = new Map();
+let homeSeq = 0;
+let accountSeq = 0;
+let logoutBusy = false;
 
 const state = {
   view: "now",
@@ -300,7 +306,11 @@ async function loadMeta() {
 }
 
 async function loadAccount() {
-  state.account = await api.account();
+  const seq = ++accountSeq;
+  const account = await api.account();
+  if (seq !== accountSeq) return;
+  state.account = account;
+  loadedAt.me = Date.now();
   const chip = $("#plan-chip");
   const pro = !!(state.account && state.account.pro);
   chip.hidden = !pro;
@@ -321,11 +331,16 @@ async function loadEntries({ cursor = null, page = 0 } = {}) {
     state.logPage = page;
     if (!page) state.logPages = [null];
     state.logPages[page + 1] = res.next_cursor;
+    loadedAt.log = Date.now();
   } finally { if (seq === logSeq) state.logBusy = false; }
 }
 async function loadHome() {
-  state.home = await api.home();
+  const seq = ++homeSeq;
+  const home = await api.home();
+  if (seq !== homeSeq) return;
+  state.home = home;
   state.total = state.home.total;
+  loadedAt.now = Date.now();
 }
 async function reloadLog() {
   await loadEntries();
@@ -349,6 +364,8 @@ async function entriesChanged() {
 /* 记录一变，总结就过期。原来只在切换统计窗口时重拉，
 于是「记几条 → 回总结页」看到的还是进页面时那份数字。 */
 function invalidateInsights() {
+  analysisController?.abort();
+  loadedAt.insights = 0;
   ++insightsSeq;
   ++aiSeq;
   state.aiBusy = false;
@@ -361,13 +378,16 @@ function invalidateInsights() {
 let insightsSeq = 0;
 /* AI 分析同理：切了窗口或重发请求，旧的那份回来就该丢掉 */
 let aiSeq = 0;
+let analysisController = null;
 
 async function loadInsights() {
   const seq = ++insightsSeq;
+  const analysisSeq = aiSeq;
   const [ins, stats] = await Promise.all([api.insights(), api.stats()]);
-  if (seq !== insightsSeq) return false;
+  if (seq !== insightsSeq || analysisSeq !== aiSeq) return false;
   state.insights = ins;
   state.stats = stats;
+  loadedAt.insights = Date.now();
   // Model calls only happen after an explicit analyze action.
   return true;
 }
@@ -376,13 +396,16 @@ async function runAnalysis({ force = false } = {}) {
   if (!state.insights || state.aiBusy) return;
   const days = state.insightsDays;
   const seq = ++aiSeq;
+  const controller = new AbortController();
+  analysisController = controller;
   state.aiBusy = true;
   state.aiError = "";
   if (state.view === "insights") render();
   try {
-    const payload = await api.analyzeInsights(force);
+    const payload = await api.analyzeInsights(force, controller.signal);
     if (seq !== aiSeq || days !== state.insightsDays) return;
     state.insights = payload;
+    loadedAt.insights = Date.now();
     if (payload.ai && payload.ai.status === "error") state.aiError = payload.ai.message || "";
   } catch (err) {
     if (seq !== aiSeq) return;
@@ -391,6 +414,7 @@ async function runAnalysis({ force = false } = {}) {
   } finally {
     if (seq === aiSeq) {
       state.aiBusy = false;
+      analysisController = null;
       if (state.view === "insights") render();
     }
   }
@@ -444,33 +468,48 @@ async function nav(view) {
     scrollMemo[view] = 0;
     const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     window.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
+    await ensureViewData(view, { force: true });
     return;
   }
   history.pushState({ view }, "", `#${view}`);
   setView(view);
-  await ensureViewData(view);
+  await ensureViewData(view, { force: true });
 }
 
-async function ensureViewData(view) {
-  try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    if (state.account && state.home.local_today !== today) {
-      invalidateInsights();
-      await loadHome();
-      if (state.view === "now") render();
+async function ensureViewData(view, { force = false, silent = false } = {}) {
+  if (!state.account || logoutBusy || !overlay.hidden || state.aiBusy || state.logBusy ||
+      (confirmLayer && !confirmLayer.hidden) ||
+      document.activeElement?.matches("input, textarea, select")) return false;
+  if (viewRefreshes.has(view)) return viewRefreshes.get(view);
+  const task = (async () => {
+    try {
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const dayChanged = state.home.local_today !== today;
+      if (dayChanged) {
+        invalidateInsights();
+        state.logReady = false;
+        labelCache.clear();
+      }
+      const stale = force || dayChanged || Date.now() - loadedAt[view] >= REFRESH_AGE_MS;
+      const jobs = [];
+      if (stale) jobs.push(loadHome(), loadAccount());
+      if (view === "insights" && (stale || !state.insights)) jobs.push(loadInsights());
+      if (view === "log" && (stale || !state.logReady)) {
+        jobs.push(loadEntries({ cursor: state.logPages[state.logPage], page: state.logPage }));
+      }
+      await Promise.all(jobs);
+      if (!state.account) return false;
+      if (jobs.length && state.view === view) render();
+      return true;
+    } catch (err) {
+      if (!silent && err.name !== "AbortError") toast(err.message);
+      return false;
     }
-    if (view === "insights" && !state.insights) {
-      await loadInsights();
-      if (state.view === "insights") render();
-    }
-    if (view === "log" && !state.logReady) {
-      await loadEntries();
-      if (state.view === "log") render();
-    }
-  } catch (err) {
-    toast(err.message);
-  }
+  })();
+  viewRefreshes.set(view, task);
+  try { return await task; }
+  finally { if (viewRefreshes.get(view) === task) viewRefreshes.delete(view); }
 }
 
 window.addEventListener("popstate", (event) => {
@@ -534,12 +573,26 @@ function greeting() {
   return t("now.greeting_evening");
 }
 
+function emotionFace(key) {
+  const expressions = {
+    anger: '<path d="m12 14 5 2m11-2-5 2M14 28q6-5 12 0"/><path d="M16 20v1m8-1v1"/>',
+    sadness: '<path d="M13 18h3m8 0h3M14 28q6-6 12 0"/><path d="M28 23v3"/>',
+    despair: '<path d="m12 18 5 2m6 0 5-2M15 28h10"/>',
+    anxiety: '<path d="m12 16 5-2m6 0 5 2M16 20v1m8-1v1"/><ellipse cx="20" cy="28" rx="3" ry="2"/>',
+    drained: '<path d="M12 19h5m6 0h5M17 27h6"/>',
+    calm: '<path d="M12 19q3 3 5 0m6 0q3 3 5 0M15 26q5 5 10 0"/>',
+    good: '<path d="M12 19q3-4 5 0m6 0q3-4 5 0M14 25q6 11 12 0Z"/>',
+  };
+  return `<svg viewBox="0 0 40 40" fill="none" aria-hidden="true"><circle cx="20" cy="20" r="17" fill="currentColor" fill-opacity=".09"/><g stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${expressions[key] || expressions.calm}</g></svg>`;
+}
+
 function emotionTile(emotion, primary) {
   const tint = rgba(emotion.color, primary ? 0.13 : 0.08);
   const branch = BRANCH_LABEL[emotion.branch] ? BRANCH_LABEL[emotion.branch][getLang()] : "";
   return `<button class="emo-tile" data-act="pick" data-emotion="${emotion.key}"
       style="--emo:${emotion.color};--emo-tint:${tint}">
-      <span class="emo-label"><span class="emo-dot"></span>${esc(emotion.label)}</span>
+      <span class="emo-face">${emotionFace(emotion.key)}</span>
+      <span class="emo-label">${esc(emotion.label)}</span>
       <span class="emo-hint">${esc(emotion.hint)}</span>
       ${primary && branch ? `<span class="emo-branch">${esc(branch)}</span>` : ""}
     </button>`;
@@ -583,52 +636,54 @@ function viewNow() {
   const watch = state.home.watch ? state.home.items : [];
   const empty = state.home.total === 0;
 
-  return `<div class="stack gap-24">
-    <div class="stack gap-4">
-      <span class="eyebrow">${greeting()}</span>
-      <h1 class="display">${t("now.question")}</h1>
-      <p class="small">${t("now.hint")}</p>
-    </div>
+  const today = new Intl.DateTimeFormat(getLang() === "zh" ? "zh-CN" : "en-US", { month: "short", day: "numeric", weekday: "short" }).format(new Date());
+  return `<div class="home-layout stack gap-24">
+    <section class="now-hero">
+      <div class="hero-copy stack gap-12">
+        <div class="row-between"><span class="greeting"><span class="greeting-dot" aria-hidden="true"></span>${greeting()}</span><time class="tiny">${esc(today)}</time></div>
+        <h1 class="display">${t("now.question")}</h1>
+        <p class="small">${t("now.hint")}</p>
+      </div>
+      <img class="hero-landscape" src="./assets/landscape.svg" alt="" aria-hidden="true" width="840" height="600" />
+    </section>
 
-    <div class="stack gap-12">
+    <section class="emotion-section stack gap-12">
       <div class="row-between">
         <h2 class="eyebrow">${t("now.primary_label")}</h2>
         <span class="tiny">${t("now.primary_note")}</span>
       </div>
       <div class="emo-primary">${primary.map((e) => emotionTile(e, true)).join("")}</div>
+      <h2 class="eyebrow secondary-heading">${t("now.secondary_label")}</h2>
       <div class="emo-secondary">${secondary.map((e) => emotionTile(e, false)).join("")}</div>
-    </div>
+    </section>
 
     ${wheelCard()}
 
     ${
       empty
-        ? `<div class="empty stack gap-12" style="align-items:center">
+        ? `<div class="empty home-empty stack gap-12">
+          <span class="empty-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M9 25V10a3 3 0 0 1 3-3h12v18H12a3 3 0 0 1 0-6h12M14 11h6m-6 4h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
           <h2 class="display sm">${t("now.empty_title")}</h2>
-          <p class="small" style="max-width:34ch">${t("now.empty_body")}</p>
+          <p class="small">${t("now.empty_body")}</p>
           <ol class="onboarding small"><li>${t("now.step1")}</li><li>${t("now.step2")}</li><li>${t("now.step3")}</li></ol>
-          <button class="btn soft sm" data-act="seed">${t("now.load_demo")}</button>
-            <p class="tiny">${t("now.demo_note")}</p>
+          <details class="demo-disclosure"><summary class="small">${t("now.demo_preview")}</summary><button class="btn soft sm" data-act="seed">${t("now.load_demo")}</button><p class="tiny">${t("now.demo_note")}</p></details>
           </div>`
         : watch.length
         ? `<div class="stack gap-12">
-          <div class="row-between">
-            <h2 class="eyebrow">${t("now.watch")}</h2>
-            <span class="tiny">${t("now.watch_note")}</span>
-          </div>
+          <div class="row-between"><h2 class="section-title">${t("now.watch")}</h2><button class="text-link" data-act="nav" data-view="log">${t("now.all_logs")} <span aria-hidden="true">↗</span></button></div>
+          <p class="tiny">${t("now.watch_note")}</p>
           <div class="entry-list">${watch.map(entryRow).join("")}</div>
-          <button class="btn ghost sm" data-act="nav" data-view="log">${t("now.all_logs")}</button>
         </div>`
         : `<div class="stack gap-12">
             <div class="row-between">
-<h2 class="eyebrow">${t("now.recent")}</h2>
-<button class="chip" data-act="nav" data-view="log">${t("now.all_logs")}</button>
+<h2 class="section-title">${t("now.recent")}</h2>
+<button class="text-link" data-act="nav" data-view="log">${t("now.all_logs")} <span aria-hidden="true">↗</span></button>
 </div>
 <div class="entry-list">${state.home.items.map(entryRow).join("")}</div>
 </div>`
     }
 
-    <p class="tiny" style="text-align:center;padding-top:4px">${t("now.footer")}</p>
+    <p class="page-footnote tiny">${t("now.footer")}</p>
   </div>`;
 }
 
@@ -948,6 +1003,7 @@ function aiCard(ins) {
       <div class="skeleton" style="width:88%"></div>
       <div class="skeleton" style="width:76%"></div>
       <p class="tiny">${t("ai.analyzing_note")}</p>
+      <button class="btn ghost sm" data-act="cancel-analysis">${t("ai.cancel")}</button>
     </div>`;
   }
 
@@ -1962,6 +2018,14 @@ function closeAndSync() {
 }
 
 const ACTIONS = {
+  "refresh-data": async (node) => {
+    node.disabled = true;
+    try {
+      if (!overlay.hidden || state.aiBusy || state.logBusy) { toast(t("common.refresh_deferred")); return; }
+      if (await ensureViewData(state.view, { force: true })) toast(t("common.refreshed"));
+    } finally { node.disabled = false; }
+  },
+  "cancel-analysis": () => analysisController?.abort(),
   nav: (node, event) => {
     event.preventDefault();
     return nav(node.dataset.view);
@@ -2400,36 +2464,41 @@ function renderAuth(mode = "login") {
   document.body.classList.add("gated");
   const view = $("#view");
   if (!view) return;
-  view.innerHTML = `<div class="auth-wrap stack gap-16">
-    <div class="auth-brand"><span class="brand-name">Tether</span><p class="body-lg">${t("auth.slogan")}</p></div>
-    <div class="stack gap-6" style="text-align:center">
-      <h1 class="display sm" style="margin:0">${isLogin ? t("auth.login_title") : t("auth.register_title")}</h1>
-      <p class="small">${t("auth.lede")}</p>
+  view.innerHTML = `<div class="auth-wrap stack gap-24">
+    <div class="auth-masthead row-between">
+      <div class="brand"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 5v14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="24" r="3.4" fill="currentColor"/></svg><span class="brand-name">Tether</span></div>
+      <div class="language-switch" role="group" aria-label="${t("me.lang")}"><button class="${getLang() === "zh" ? "on" : ""}" aria-pressed="${getLang() === "zh"}" data-act="lang" data-lang="zh">中文</button><button class="${getLang() === "en" ? "on" : ""}" aria-pressed="${getLang() === "en"}" data-act="lang" data-lang="en">EN</button></div>
     </div>
-    <form class="card stack gap-14" data-auth-form data-mode="${mode}">
+    <section class="auth-intro stack gap-10">
+      <div class="auth-landscape"><img src="./assets/landscape.svg" alt="" width="840" height="600" /><span class="landscape-caption" aria-hidden="true">A LITTLE SPACE TO FEEL.</span></div>
+      <h1 class="display">${t("auth.headline")}</h1>
+      <p class="small">${t("auth.slogan")}</p>
+    </section>
+    <form class="card auth-card stack gap-16" data-auth-form data-mode="${mode}">
+      <div class="stack gap-6"><h2 class="section-title">${isLogin ? t("auth.welcome") : t("auth.register_title")}</h2><p class="small">${t("auth.lede")}</p></div>
       <label class="stack gap-6">
         <span class="field-label">${t("auth.username")}</span>
         <input type="text" name="username" autocomplete="username" autocapitalize="none"
-               spellcheck="false" required minlength="2" maxlength="24" data-autofocus />
+               spellcheck="false" placeholder="${t("auth.username_placeholder")}" required minlength="2" maxlength="24" data-autofocus />
         ${isLogin ? "" : `<span class="tiny">${t("auth.hint_user")}</span>`}
       </label>
       <label class="stack gap-6">
         <span class="field-label">${t("auth.password")}</span>
-        <input type="password" name="password" autocomplete="${isLogin ? "current-password" : "new-password"}" required minlength="${isLogin ? 1 : 8}" maxlength="128" />
+        <input type="password" name="password" placeholder="${t("auth.password_placeholder")}" autocomplete="${isLogin ? "current-password" : "new-password"}" required minlength="${isLogin ? 1 : 8}" maxlength="128" />
         ${isLogin ? "" : `<span class="tiny">${t("auth.hint_pass")}</span>`}
       </label>
-      <button class="btn block" type="submit">${isLogin ? t("auth.login") : t("auth.register")}</button>
+      <button class="btn block auth-submit" type="submit">${isLogin ? t("auth.login") : t("auth.register")}<span aria-hidden="true">→</span></button>
+      <button class="auth-switch text-link" type="button" data-act="auth-mode" data-mode="${isLogin ? "register" : "login"}">${isLogin ? t("auth.to_register") : t("auth.to_login")}</button>
     </form>
-    <button class="btn ghost block" data-act="auth-mode" data-mode="${isLogin ? "register" : "login"}">
-      ${isLogin ? t("auth.to_register") : t("auth.to_login")}
-    </button>
-    <p class="tiny">${t("auth.privacy")}</p>
-    <details class="small"><summary>${t("auth.forgot")}</summary><p>${t("auth.forgot_help")}</p></details>
-    <button class="btn soft block" data-act="open-crisis">${t("crisis.title")}</button>
-    <div class="chip-row"><button class="chip" data-act="lang" data-lang="zh">中文</button><button class="chip" data-act="lang" data-lang="en">English</button></div>
+    <div class="auth-support stack gap-4">
+      <details class="small"><summary>${t("auth.privacy_title")}</summary><p>${t("auth.privacy")}</p></details>
+      <details class="small"><summary>${t("auth.forgot")}</summary><p>${t("auth.forgot_help")}</p></details>
+      <button class="auth-help row-between" data-act="open-crisis"><span><span aria-hidden="true">♡</span> ${t("crisis.title")}</span><span aria-hidden="true">↗</span></button>
+    </div>
+    <p class="page-footnote tiny">${t("auth.footer")}</p>
   </div>`;
   const first = view.querySelector("[data-autofocus]");
-  if (first) first.focus({ preventScroll: true });
+  if (first && window.matchMedia("(hover: hover) and (pointer: fine)").matches) first.focus({ preventScroll: true });
 }
 
 document.addEventListener("submit", async (event) => {
@@ -2455,6 +2524,10 @@ document.addEventListener("submit", async (event) => {
 
 /* 会话在别的设备被踢掉、或过期时，任何一次请求都可能带回 401 */
 window.addEventListener("tether:unauthorized", () => {
+  api.cancelPending();
+  ++homeSeq;
+  ++accountSeq;
+  for (const view of VIEWS) loadedAt[view] = 0;
   state.account = null;
   state.entries = [];
   state.home = { items: [], watch: false, total: 0 };
@@ -2467,12 +2540,20 @@ window.addEventListener("tether:unauthorized", () => {
 });
 
 async function doLogout() {
+  if (logoutBusy) return;
+  logoutBusy = true;
+  const button = $('[data-act="logout"]');
+  if (button) button.disabled = true;
   try {
     await api.logout();
+    api.cancelPending();
+    location.reload();
   } catch {
-    /* 网络断了也要让本地退出 */
+    toast(t("auth.logout_failed"));
+  } finally {
+    logoutBusy = false;
+    if (button) button.disabled = false;
   }
-  location.reload();
 }
 
 async function doRedeem() {
@@ -2588,6 +2669,7 @@ async function boot() {
     if (!payload.logged_in) { renderAuth(); return; }
     document.body.classList.remove('gated');
     state.home = payload.home;
+    loadedAt.now = loadedAt.me = Date.now();
     state.total = payload.home.total;
     $('#plan-chip').hidden = !state.account.pro;
     $('#plan-chip').textContent = state.account.pro ? 'PRO' : '';
@@ -2609,10 +2691,13 @@ async function boot() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && state.account) ensureViewData(state.view);
+  if (!document.hidden && state.account) ensureViewData(state.view, { force: true, silent: true });
+});
+window.addEventListener("online", () => {
+  if (!document.hidden && state.account) ensureViewData(state.view, { force: true, silent: true });
 });
 setInterval(() => {
-  if (!document.hidden && state.account) ensureViewData(state.view);
+  if (!document.hidden && state.account) ensureViewData(state.view, { silent: true });
 }, 60000);
 
 boot();

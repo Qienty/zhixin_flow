@@ -17,6 +17,7 @@ const SHELL = [
   "./",
   "./index.html",
   "./css/app.css",
+  "./assets/landscape.svg",
   "./js/app.js",
   "./js/api.js",
   "./js/i18n.js",

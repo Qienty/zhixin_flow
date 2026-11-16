@@ -305,6 +305,8 @@ def redeem(user_id: int, code: str) -> dict:
 
     conn = db.connect()
     try:
+        # Reserve the write transaction before checking the remaining uses.
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM redeem_codes WHERE code = ?", (code,)).fetchone()
         if not row:
             raise AuthError(404, "这个兑换码不存在")

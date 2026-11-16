@@ -481,6 +481,7 @@ def delete_all_entries(req: Request):
     try:
         # 只清当前账号自己的记录
         deleted = conn.execute("DELETE FROM entries WHERE user_id = ?", (req.user["id"],)).rowcount
+        ai.cache_clear(req.user["id"], conn)
         conn.commit()
     finally:
         conn.close()
@@ -611,7 +612,7 @@ def _redact(text: str) -> str:
     return re.sub(r"sk-[A-Za-z0-9_\-]{4,}", "sk-***", text or "")
 
 
-def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str) -> dict:
+def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str, user_id: int) -> dict:
     """这一屏归 AI 还是归规则引擎。
 
     状态直接决定界面长什么样：
@@ -636,7 +637,7 @@ def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str)
             "have": len(entries),
         }
 
-    narrative = ai.cache_get(ai.fingerprint(entries, days, lang, cfg["model"]))
+    narrative = ai.cache_get(ai.fingerprint(entries, days, lang, cfg["model"]), user_id)
     if narrative is None:
         return {**info, "status": "pending"}
 
@@ -658,7 +659,7 @@ def get_insights(req: Request):
     plan = req.user["plan"]
     entries = _window_entries(req)
     payload = _rules(req, entries, locked=(plan != "pro"))
-    payload["ai"] = _ai_state(entries, days, req.lang, payload, plan)
+    payload["ai"] = _ai_state(entries, days, req.lang, payload, plan, req.user["id"])
     return payload
 
 
@@ -685,6 +686,7 @@ def analyze_insights(req: Request):
     force = bool(body.get("force"))
     lang = req.lang
 
+    revision = ai.data_revision(req.user["id"])
     entries = _window_entries(req)
     rules = _rules(req, entries, locked=False)
 
@@ -699,14 +701,15 @@ def analyze_insights(req: Request):
         return rules
 
     fingerprint = ai.fingerprint(entries, days, lang, cfg["model"])
-    narrative = None if force else ai.cache_get(fingerprint)
+    narrative = None if force else ai.cache_get(fingerprint, req.user["id"])
     from_cache = narrative is not None
     error = ""
 
     if narrative is None:
         try:
             narrative = ai.analyze(entries, days, lang, rules)
-            ai.cache_put(fingerprint, narrative, cfg["model"])
+            if not ai.cache_put(fingerprint, narrative, cfg["model"], req.user["id"], revision):
+                raise ApiError(409, "记录已变化，请刷新后重新分析" if lang == "zh" else "Entries changed. Refresh before analyzing again.")
         except ai.AIError as exc:
             error = str(exc)
 

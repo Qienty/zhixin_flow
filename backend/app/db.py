@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS settings (
 -- 免得每次翻到总结页都把同样的数据再算一遍。
 CREATE TABLE IF NOT EXISTS ai_cache (
     key        TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
     payload    TEXT NOT NULL,
     model      TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS users (
     plan       TEXT NOT NULL DEFAULT 'free',
     region     TEXT NOT NULL DEFAULT 'CN',
     lang       TEXT NOT NULL DEFAULT 'zh',
+    data_revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -154,6 +156,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_local ON entries(user_id, local_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_time ON entries(user_id, occurred_at DESC, id DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_rank ON entries(user_id, COALESCE(severity, 0) DESC, occurred_at DESC, id DESC)")
+    if "data_revision" not in _columns(conn, "users"):
+        conn.execute("ALTER TABLE users ADD COLUMN data_revision INTEGER NOT NULL DEFAULT 0")
+    if "user_id" not in _columns(conn, "ai_cache"):
+        conn.execute("ALTER TABLE ai_cache ADD COLUMN user_id INTEGER")
+    # Legacy cache keys cannot be mapped back to an owner. Keep the source records.
+    conn.execute("DELETE FROM ai_cache WHERE user_id IS NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_user ON ai_cache(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_created ON ai_cache(created_at)")
+    for event, owners in (("INSERT", "NEW.user_id"), ("UPDATE", "OLD.user_id, NEW.user_id"), ("DELETE", "OLD.user_id")):
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS entries_invalidate_ai_{event.lower()}
+            AFTER {event} ON entries BEGIN
+                UPDATE users SET data_revision = data_revision + 1 WHERE id IN ({owners});
+                DELETE FROM ai_cache WHERE user_id IN ({owners});
+            END""")
 
 
 def get_setting(key: str, default: str = "") -> str:

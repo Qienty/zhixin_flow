@@ -14,6 +14,7 @@ import os
 import posixpath
 import socketserver
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 FRONTEND = ROOT.parent / "frontend"
 sys.path.insert(0, str(ROOT))
 
-from app import db, __version__  # noqa: E402
+from app import ai, db, __version__  # noqa: E402
 from app.api import Request, Response, dispatch, parse_query  # noqa: E402
 
 mimetypes.add_type("application/javascript; charset=utf-8", ".js")
@@ -195,6 +196,15 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    _next_cache_cleanup = 0.0
+
+    def service_actions(self) -> None:
+        if time.monotonic() >= self._next_cache_cleanup:
+            self._next_cache_cleanup = time.monotonic() + 3600
+            try:
+                ai.cache_prune()
+            except Exception as exc:
+                sys.stderr.write(f"AI cache cleanup failed: {type(exc).__name__}\n")
 
 
 def main() -> None:

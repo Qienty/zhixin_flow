@@ -21,6 +21,7 @@ import pathlib
 import time
 import urllib.error
 import urllib.request
+from datetime import timedelta
 
 from . import db
 
@@ -494,23 +495,37 @@ def fingerprint(entries: list[dict], days: int, lang: str, model: str) -> str:
     return digest.hexdigest()
 
 
-def cache_get(key: str) -> dict | None:
+def cache_prune(connection=None) -> None:
+    """Physically remove expired summaries, including cache entries never read again."""
+    conn = connection or db.connect()
+    try:
+        cutoff = (db.now_utc() - timedelta(hours=CACHE_TTL_HOURS)).isoformat(timespec="seconds")
+        conn.execute("DELETE FROM ai_cache WHERE julianday(created_at) IS NULL OR julianday(created_at) <= julianday(?)", (cutoff,))
+        if connection is None:
+            conn.commit()
+    finally:
+        if connection is None:
+            conn.close()
+
+
+def data_revision(user_id: int) -> int:
     conn = db.connect()
     try:
-        row = conn.execute("SELECT payload, created_at FROM ai_cache WHERE key = ?", (key,)).fetchone()
+        row = conn.execute("SELECT data_revision FROM users WHERE id = ?", (user_id,)).fetchone()
+        return row["data_revision"] if row else -1
+    finally:
+        conn.close()
+
+
+def cache_get(key: str, user_id: int) -> dict | None:
+    conn = db.connect()
+    try:
+        cache_prune(conn)
+        row = conn.execute("SELECT payload FROM ai_cache WHERE key = ? AND user_id = ?", (key, user_id)).fetchone()
+        conn.commit()
     finally:
         conn.close()
     if not row:
-        return None
-    from datetime import datetime, timedelta, timezone
-
-    try:
-        created = datetime.fromisoformat(row["created_at"])
-    except ValueError:
-        return None
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    if datetime.now(timezone.utc) - created > timedelta(hours=CACHE_TTL_HOURS):
         return None
     try:
         return json.loads(row["payload"])
@@ -518,24 +533,34 @@ def cache_get(key: str) -> dict | None:
         return None
 
 
-def cache_put(key: str, narrative: dict, model: str) -> None:
+def cache_put(key: str, narrative: dict, model: str, user_id: int, revision: int) -> bool:
     conn = db.connect()
     try:
+        # Deletion/edit and cache insertion serialize on the same SQLite write lock.
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT data_revision FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None or row["data_revision"] != revision:
+            conn.rollback()
+            return False
+        cache_prune(conn)
         conn.execute(
-            "INSERT INTO ai_cache(key, payload, model, created_at) VALUES(?, ?, ?, ?) "
+            "INSERT INTO ai_cache(key, payload, model, created_at, user_id) VALUES(?, ?, ?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, "
-            "model = excluded.model, created_at = excluded.created_at",
-            (key, json.dumps(narrative, ensure_ascii=False), model, db.now_iso()),
+            "model = excluded.model, created_at = excluded.created_at, user_id = excluded.user_id",
+            (key, json.dumps(narrative, ensure_ascii=False), model, db.now_iso(), user_id),
         )
         conn.commit()
+        return True
     finally:
         conn.close()
 
 
-def cache_clear() -> None:
-    conn = db.connect()
+def cache_clear(user_id: int, connection=None) -> None:
+    conn = connection or db.connect()
     try:
-        conn.execute("DELETE FROM ai_cache")
-        conn.commit()
+        conn.execute("DELETE FROM ai_cache WHERE user_id = ?", (user_id,))
+        if connection is None:
+            conn.commit()
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()

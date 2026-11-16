@@ -10,7 +10,7 @@
 python backend/server.py 8000
 ```
 
-访问 http://127.0.0.1:8000/。Windows 可运行 `start.bat`；脚本也会查找此次验证安装在项目 `.runtime/python/` 下的 Python。端口也可用 `PORT` 配置，`HOST` 默认 `127.0.0.1`。
+访问 http://127.0.0.1:8000/。Windows 可运行 `start.bat`，优先使用 PATH 中的 Python；项目不附带 Python 运行时。命令行未指定端口时可用 `PORT` 配置，`HOST` 默认 `127.0.0.1`。
 
 首次启动自动建库并迁移表结构。每个账号的数据相互隔离；升级前应备份 SQLite 数据库。默认位置为 `backend/data/tether.db`，可通过进程环境变量 `TETHER_DATA_DIR` 指定其他数据目录。不要删除数据库来更新应用。
 
@@ -22,6 +22,8 @@ python backend/server.py 8000
 - 超过 14 天的数据不会删除。记录页支持全历史筛选、严重程度/时间排序、旧记录筛选、编辑、删除和逐条补全。服务端游标分页，每页 40 条，浏览器仅渲染当前页。
 - JSON/CSV 导出包含全部记录。JSON 导入只追加，完全相同的条目跳过，错误文件整批拒绝。每次最多 5000 条、8 MiB；更大的备份需拆分。
 - 演示数据先确认再追加 28 条，永不覆盖；演示记录参与统计，建议在测试账号使用。已有未补全记录不会自动清除。
+- 顶部可手动刷新；切换页面、从后台返回和网络恢复时更新数据，页面停留期间每分钟检查一次。自动更新会避开正在编辑、保存或分析的操作，保留记录页的当前分页位置。
+- 普通请求等待上限为 30 秒，AI 分析为 5 分钟。超时会恢复操作入口并保留当前保存草稿，不自动重发写入请求。AI 可点击「停止等待」；这不会撤销服务器已经收到的操作，也不保证停止模型计费。
 
 ## AI 与 Pro
 
@@ -37,6 +39,10 @@ TETHER_AI_MODEL=deepseek-flash
 
 缓存依据记录内容版本、账号、语言、模型以及当前本地日期生成指纹；旧的按天数缓存自动失效。趋势数字与文案来自同一规则计算，模型不能覆盖趋势文本。归因证据默认折叠，场景提醒并入对应卡片。
 
+AI 缓存按账号保存。新增、编辑、删除记录会在同一数据库事务中清理该账号的旧摘要，清空记录也会清理该账号缓存。记录版本检查会拒绝保存分析期间已被修改或删除的数据所生成的摘要。缓存有效期为 24 小时，读写缓存时及服务启动后每小时删除过期缓存行；服务停止期间的清理在下次启动后执行。
+
+升级会自动清除无法识别账号归属的旧版 AI 缓存，保留原始记录和账号。这是数据库缓存清理，不会处理此前导出的文件、服务器备份或外部模型服务保存的数据。
+
 生成兑换码：
 
 ```sh
@@ -44,6 +50,8 @@ cd backend
 python -m app.codes 10
 python -m app.codes --list
 ```
+
+兑换额度检查、使用次数扣减和账号升级在同一个写事务内完成，限制并发请求重复消耗一次性兑换码。
 
 ## 隐私与登录保护
 
@@ -53,23 +61,21 @@ python -m app.codes --list
 
 登录和旧密码验证按账号及客户端 IP 限速：5 分钟内账号最多 5 次失败，IP 最多 20 次；达到上限后返回 429 和 Retry-After。限速状态保存在单进程内存中，重启会清零。多进程部署应在网关增加共享限速。没有自助找回密码；界面提供联系管理员说明。
 
+退出登录只有收到服务器成功响应后才刷新页面。失败或超时会提示会话可能仍有效，并允许重新点击退出；不会把网络失败显示成退出成功。
+
 ## HTTPS 与反向代理
 
-部署模板见 `deploy/nginx.conf.example`。替换域名、证书路径，并设置 Python 服务的进程环境变量 `TETHER_TRUSTED_PROXIES=127.0.0.1`（按照实际代理地址调整）。代理必须覆盖 `X-Real-IP`、`X-Forwarded-Proto`；不信任普通客户端自报的头。仅可信 HTTPS 代理下发 Secure Cookie 和 HSTS。
+项目当前不附带 Nginx 部署模板。部署时需自行配置域名、证书和反向代理，并设置 Python 服务的进程环境变量 `TETHER_TRUSTED_PROXIES=127.0.0.1`（按照实际代理地址调整）。代理必须覆盖 `X-Real-IP`、`X-Forwarded-Proto`；不信任普通客户端自报的头。仅可信 HTTPS 代理下发 Secure Cookie 和 HSTS。AI 请求可能持续数分钟，代理读取超时应配合前端的 5 分钟等待上限设置。
 
 Python 提供 CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy 和 Permissions-Policy，文本响应使用 UTF-8。页面脚本全部外置，匹配 CSP。未知 API 返回 JSON 404，未知静态路径返回 HTML 404；API 响应禁止缓存。
 
 挂到 `/qienty/` 时访问地址必须带尾部 `/`，Nginx 使用带尾部 `/` 的 proxy_pass 去掉前缀。前端及 service worker 均按当前部署前缀工作。
 
-**模板不代表服务器已启用 HTTPS。** 本次只修改本地项目，没有安装线上证书、更新 Nginx 或发布服务器。
+应用代码不会自动启用 HTTPS，需由部署环境配置证书和代理。
 
 ## PWA
 
-清单包含 192/512 PNG 图标和 180 像素 Apple 图标，沿用现有 SVG 标识。修改图标几何后可更新 `scripts/build_icons.py` 并运行：
-
-```sh
-python scripts/build_icons.py
-```
+清单包含 192/512 PNG 图标和 180 像素 Apple 图标，沿用现有 SVG 标识。项目当前不附带图标生成脚本；更新标识时需同步替换 `frontend/icon.svg`、`frontend/icon-192.png`、`frontend/icon-512.png` 和 `frontend/apple-touch-icon-180.png`。
 
 Python 提供 `sw.js` 时自动将前端资产内容 hash 注入缓存版本。静态壳使用网络优先、离线兜底；API 不进入 service worker 缓存。若额外使用独立静态服务器，需等价实现 hash 注入，不能直接绕过 Python 托管。
 
@@ -100,7 +106,7 @@ Python 提供 `sw.js` 时自动将前端资产内容 hash 注入缓存版本。�
 python -m unittest discover -s tests -v
 ```
 
-后端测试使用临时数据库，覆盖日期边界、时区、全历史保留、登录限速、跨账号隔离、分页、参数校验、导入原子性、CSV 防护、手动 AI 缓存和 HTTP 响应。
+`tests/test_regressions.py` 使用临时数据库，覆盖兑换并发与事务回滚、缓存账号隔离和清理、分析期间删除记录、旧缓存迁移、保存幂等、跨账号记录隔离、JSON 导入导出和登录会话。测试不读取真实业务数据库，不调用模型服务。
 
 前端纯逻辑测试需要 Node.js：
 
@@ -108,6 +114,6 @@ python -m unittest discover -s tests -v
 node tests/run_frontend.mjs
 ```
 
-`tests/frontend_checks.mjs` 使用隔离的 API/DOM stub 验证草稿保存、退出、防重入、手动 AI、分页请求、转义和双语文案；它不等同于真实浏览器验收。`__` 开头的开发页面默认返回 404，只有显式设置 `TETHER_DEV_PAGES=1` 才开放。
+`tests/run_frontend.mjs` 使用 Node.js 内置模块和隔离的 API/DOM stub，覆盖请求超时与取消、前后台刷新、旧响应隔离、退出重试、草稿重试与双语键一致性。不需要安装 npm 依赖；这些检查不等同于真实浏览器视觉及交互验收。
 
-完整变更对照与尚未实机验收的事项见 `审核修复说明.md`。
+`__` 开头的开发页面默认返回 404，只有显式设置 `TETHER_DEV_PAGES=1` 才开放。`frontend/__harness.html` 是历史人工调试页面，不作为当前自动化测试入口。
