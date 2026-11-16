@@ -731,41 +731,50 @@ function sparkline(days) {
   const byDay = new Map(Object.entries(state.stats?.daily_max || {}));
   if (!byDay.size) return "";
 
-  /* 一天一格：有记录才画柱，没记录就留空。
-     用固定宽度 + space-between，30 天也不会糊成一片，柱子也不会压到上面的说明。 */
   const today = new Date();
-  const cells = [];
-  let hasData = false;
+  const dateFormat = new Intl.DateTimeFormat(locale(), { month: "short", day: "numeric" });
+  const points = [];
   for (let i = days - 1; i >= 0; i -= 1) {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const sev = byDay.get(key) || 0;
-    if (!sev) {
-      cells.push(`<span class="spark-slot" title="${key} · —"></span>`);
-      continue;
-    }
-    hasData = true;
-    const height = 10 + (sev / 5) * 44;
-    cells.push(
-      `<span class="spark-bar ${sev >= 4 ? "hot" : ""}" style="--h:${height}px" title="${key} · ${sev}"></span>`
-    );
+    const raw = Number(byDay.get(key));
+    const value = Number.isInteger(raw) && raw >= 1 && raw <= 5 ? raw : null;
+    points.push({ key, label: dateFormat.format(d), value, today: i === 0 });
   }
-  if (!hasData) return "";
-
-  const start = new Date(today);
-  start.setDate(today.getDate() - days + 1);
-  return `<div class="card stack gap-8">
-    <div class="row-between">
-      <h2 class="eyebrow">${t("ins.spark")}</h2>
-      <span class="tiny">${t("ins.spark_note")}</span>
+  if (!points.some((p) => p.value !== null)) return "";
+  const tickIndexes = new Set([0, Math.round((days - 1) / 3), Math.round(2 * (days - 1) / 3), days - 1]);
+  const rating = (p) => p.value === null ? t("ins.spark_unrated") : t("ins.spark_score", { n: p.value });
+  const columns = points.map((p, index) => {
+    const edge = index < 3 ? "edge-start" : index >= days - 3 ? "edge-end" : "";
+    return `<span class="intensity-day ${p.value >= 4 ? "high" : ""} ${p.today ? "is-today" : ""} ${edge}" style="--bar-height:${(p.value || 0) * 20}%">
+      ${p.value === null ? `<span class="intensity-missing"></span>` : `<span class="intensity-bar"></span>`}
+      <span class="intensity-tooltip">${esc(p.label)}<strong>${esc(rating(p))}</strong></span>
+    </span>`;
+  }).join("");
+  const ticks = points.map((p, index) => `<span class="${p.today ? "is-today" : ""}">${tickIndexes.has(index) ? esc(p.today ? t("ins.spark_today") : p.label) : ""}</span>`).join("");
+  return `<section class="card intensity-card" aria-labelledby="intensity-title" style="--day-count:${days}">
+    <div class="intensity-heading">
+      <div><h2 id="intensity-title">${t("ins.spark")}</h2><p>${t("ins.spark_period", { days })}</p></div>
+      <span class="intensity-scale">${t("ins.spark_scale")}</span>
     </div>
-    <div class="spark">${cells.join("")}</div>
-    <div class="spark-axis">
-      <span class="tiny">${start.toLocaleDateString(locale(), { month: "short", day: "numeric" })}</span>
-      <span class="tiny">${t("ins.spark_today")}</span>
-    </div>
-  </div>`;
+    <figure class="intensity-figure" aria-label="${esc(t("ins.spark_accessible", { days }))}">
+      <div class="intensity-plot" aria-hidden="true">
+        <div class="intensity-guides">${[1, 3, 5].map((n) => `<div style="bottom:${n * 20}%"><span>${n}</span></div>`).join("")}</div>
+        <div class="intensity-days">${columns}</div>
+      </div>
+      <div class="intensity-dates" aria-hidden="true">${ticks}</div>
+      <figcaption class="intensity-legend">
+        <span><i></i>${t("ins.spark_low")}</span>
+        <span><i class="high"></i>${t("ins.spark_high")}</span>
+        <span><i class="missing"></i>${t("ins.spark_unrated")}</span>
+      </figcaption>
+    </figure>
+    <details class="intensity-data">
+      <summary>${t("ins.spark_details")}<span aria-hidden="true">＋</span></summary>
+      <table><caption class="sr-only">${t("ins.spark")}</caption><thead><tr><th scope="col">${t("ins.spark_date")}</th><th scope="col">${t("ins.spark_value")}</th></tr></thead><tbody>${points.map((p) => `<tr><th scope="row">${esc(p.key)}</th><td>${esc(rating(p))}</td></tr>`).join("")}</tbody></table>
+    </details>
+  </section>`;
 }
 
 function distRow(d, maxCount) {

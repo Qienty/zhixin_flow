@@ -527,33 +527,163 @@ a { color: var(--moss); }
   color: var(--on-ink);
 }
 
-/* 14 天强度走势：前端用已有记录算，不额外请求 */
-/* 每天最高强度：一天一格，有记录才有柱。
-   固定 7px 宽 + 两端对齐，30 天也只是变密，不会糊成一块，也不会压到上面的说明文字。 */
-.spark {
+/* 每日峰值：固定 1—5 分刻度，空心点单独表示未评分。 */
+.intensity-card { padding: 20px 20px 0; }
+.intensity-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.intensity-heading h2 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.5; }
+.intensity-heading p { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.intensity-scale {
+  flex-shrink: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink-2);
+  font-size: 10.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.intensity-figure { margin: 30px 0 0; }
+.intensity-plot {
+  position: relative;
+  height: 118px;
+  margin-left: 22px;
+  border-bottom: 1px solid var(--line-strong);
+}
+.intensity-guides { position: absolute; inset: 0; pointer-events: none; }
+.intensity-guides > div { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--line); }
+.intensity-guides span {
+  position: absolute;
+  left: -22px;
+  width: 12px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1;
+  text-align: center;
+  transform: translateY(-50%);
+  font-variant-numeric: tabular-nums;
+}
+.intensity-days {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--day-count), minmax(0, 1fr));
+}
+.intensity-day {
+  position: relative;
   display: flex;
   align-items: flex-end;
+  justify-content: center;
+  min-width: 0;
+  height: 100%;
+}
+.intensity-day.is-today::before {
+  content: "";
+  position: absolute;
+  inset: -9px 7% -1px;
+  border-radius: 6px 6px 0 0;
+  background: var(--veil);
+}
+.intensity-bar {
+  position: relative;
+  width: 54%;
+  min-width: 6px;
+  max-width: 18px;
+  height: var(--bar-height);
+  border-radius: 5px 5px 1px 1px;
+  background: linear-gradient(to top, var(--moss), var(--moss-2));
+  opacity: 0.86;
+  transition: opacity 0.18s ease;
+}
+.intensity-day.high .intensity-bar { background: linear-gradient(to top, var(--brick), var(--hot)); }
+.intensity-day:is(:hover, .is-today) .intensity-bar { opacity: 1; }
+.intensity-missing {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--faint);
+  border-radius: 50%;
+  background: var(--surface);
+  transform: translateY(3px);
+}
+.intensity-tooltip {
+  position: absolute;
+  z-index: 2;
+  bottom: calc(min(var(--bar-height), 65%) + 9px);
+  left: 50%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--on-ink);
+  box-shadow: var(--shadow-2);
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transform: translateX(-50%) translateY(3px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.intensity-tooltip strong { display: block; font-size: 12px; font-weight: 600; }
+.intensity-day:hover { z-index: 1; }
+.intensity-day:hover .intensity-tooltip { visibility: visible; opacity: 1; transform: translateX(-50%) translateY(0); }
+.intensity-day.edge-start .intensity-tooltip { left: 0; transform: translateY(3px); }
+.intensity-day.edge-end .intensity-tooltip { left: auto; right: 0; transform: translateY(3px); }
+.intensity-day:is(.edge-start, .edge-end):hover .intensity-tooltip { transform: translateY(0); }
+.intensity-dates {
+  display: grid;
+  grid-template-columns: repeat(var(--day-count), minmax(0, 1fr));
+  margin: 11px 0 0 22px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.intensity-dates > span { justify-self: center; white-space: nowrap; }
+.intensity-dates .is-today { color: var(--moss); font-weight: 600; }
+.intensity-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px 14px;
+  margin: 18px 0 14px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.intensity-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.intensity-legend i { width: 7px; height: 7px; border-radius: 2px; background: var(--moss-2); }
+.intensity-legend i.high { background: var(--brick); }
+.intensity-legend i.missing { border: 1px solid var(--faint); border-radius: 50%; background: transparent; }
+.intensity-data { border-top: 1px solid var(--line); }
+.intensity-data summary {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 2px;
-  height: 56px;
-  margin-top: 6px;
-  padding-bottom: 1px;
+  gap: 12px;
+  min-height: 44px;
+  color: var(--muted);
+  font-size: 11px;
+  list-style: none;
+  cursor: pointer;
 }
-.spark-bar,
-.spark-slot {
-  flex: 0 0 auto;
-  width: 7px;
-  border-radius: 3.5px;
+.intensity-data summary::-webkit-details-marker { display: none; }
+.intensity-data summary > span { font-size: 18px; font-weight: 300; transition: transform 0.18s ease; }
+.intensity-data[open] summary { color: var(--ink); }
+.intensity-data[open] summary > span { transform: rotate(45deg); }
+.intensity-data table { width: 100%; margin: 0 0 16px; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.intensity-data th, .intensity-data td { padding: 9px 0; border-top: 1px solid var(--line); text-align: left; }
+.intensity-data thead th { color: var(--muted); font-size: 11px; font-weight: 500; }
+.intensity-data tbody th { color: var(--ink-2); font-weight: 400; }
+.intensity-data th:last-child, .intensity-data td:last-child { text-align: right; }
+@media (max-width: 360px) {
+  .intensity-card { padding: 16px 16px 0; }
+  .intensity-plot { height: 104px; }
+  .intensity-heading h2 { font-size: 14px; }
 }
-.spark-bar {
-  height: var(--h, 8px);
-  background: var(--moss-tint);
-  transition: height 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-.spark-bar.hot { background: var(--hot); }
-/* 没记录的那天：不留任何色块，只有一个看不见的定位点 */
-.spark-slot { height: 0; }
-.spark-axis { display: flex; justify-content: space-between; margin-top: 6px; }
 
 .delta-pill {
   display: inline-flex;
