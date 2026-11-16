@@ -99,6 +99,34 @@ CREATE TABLE IF NOT EXISTS wheel_items (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wheel_user ON wheel_items(user_id);
+
+-- Independent, resumable self-help sessions. Content is snapshotted at start.
+CREATE TABLE IF NOT EXISTS practice_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    practice_id TEXT NOT NULL,
+    content_version INTEGER NOT NULL,
+    content_snapshot TEXT NOT NULL,
+    entry_id INTEGER REFERENCES entries(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'in_progress' CHECK(status IN ('in_progress', 'completed', 'stopped')),
+    step_index INTEGER NOT NULL DEFAULT 0,
+    before_score INTEGER CHECK(before_score BETWEEN 1 AND 5),
+    after_score INTEGER CHECK(after_score BETWEEN 1 AND 5),
+    relief TEXT CHECK(relief IN ('better', 'same', 'worse')),
+    responses TEXT NOT NULL DEFAULT '{}',
+    note TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    local_date TEXT NOT NULL,
+    tz_offset INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    last_request_id TEXT,
+    UNIQUE(user_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_practice_user ON practice_sessions(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_practice_date ON practice_sessions(user_id, local_date, status);
 """
 
 DEFAULTS = {

@@ -8,6 +8,7 @@ const read = (file) => fs.readFile(new URL(file, root), "utf8");
 const appSource = await read("frontend/js/app.js");
 const clientSource = await read("frontend/js/api.js");
 const i18nSource = await read("frontend/js/i18n.js");
+const practiceSource = await read("frontend/js/practices.js");
 const plain = (source) => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -69,10 +70,10 @@ function app(overrides = {}) {
     api, document, window, Date, Intl, AbortController, URL, URLSearchParams,
     location: { hash: "#now", reload: () => calls.push("reload") },
     history: { pushState() {}, back() {}, replaceState() {} },
-    setTimeout: () => 1, clearTimeout() {}, setInterval() {}, requestAnimationFrame: () => 1,
+    setTimeout: () => 1, clearTimeout() {}, setInterval() {}, clearInterval() {}, requestAnimationFrame: () => 1,
     t: (key) => key, getLang: () => "zh", tzOffset: () => 480, messages,
   });
-  vm.runInContext(plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
+  vm.runInContext(plain(practiceSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
     render = () => {}; renderAuth = () => {}; renderLogList = () => {};
     toast = (message) => messages.push(message);
     globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay };
@@ -83,7 +84,7 @@ function app(overrides = {}) {
 }
 
 test("JavaScript syntax and Chinese/English key parity", async () => {
-  for (const file of ["app", "api", "i18n", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
+  for (const file of ["app", "api", "i18n", "practices", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
   const context = vm.createContext({});
   vm.runInContext(plain(i18nSource) + "\nglobalThis.tables = dict;", context);
   assert.deepEqual(Object.keys(context.tables.zh).sort(), Object.keys(context.tables.en).sort());

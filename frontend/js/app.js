@@ -2,6 +2,7 @@
 
 import { api, setApiLang, tzOffset } from "./api.js";
 import { t, setLang, getLang, applyStaticText } from "./i18n.js";
+import { createPracticeController } from "./practices.js";
 
 /* ------------------------------------------------------------- 常量与状态 */
 
@@ -20,10 +21,10 @@ const SEV_LABEL = {
   en: { 1: "faint", 2: "mild", 3: "mid", 4: "strong", 5: "peak" },
 };
 
-const VIEWS = ["now", "log", "insights", "me"];
+const VIEWS = ["now", "practice", "log", "insights", "me"];
 const PAGE_SIZE = 40;
 const REFRESH_AGE_MS = 30000;
-const loadedAt = { now: 0, log: 0, insights: 0, me: 0 };
+const loadedAt = { now: 0, practice: 0, log: 0, insights: 0, me: 0 };
 const viewRefreshes = new Map();
 let homeSeq = 0;
 let accountSeq = 0;
@@ -441,7 +442,7 @@ function hashView() {
 
 /* 每个视图记住自己的滚动位置：从记录列表翻到一半去看总结，回来还在原处。
 视图是整块 innerHTML 重绘，浏览器自带的滚动恢复帮不上忙。 */
-const scrollMemo = { now: 0, log: 0, insights: 0, me: 0 };
+const scrollMemo = { now: 0, practice: 0, log: 0, insights: 0, me: 0 };
 
 function setView(view, { scroll = "restore" } = {}) {
   if (state.view !== view) scrollMemo[state.view] = window.scrollY;
@@ -495,6 +496,7 @@ async function ensureViewData(view, { force = false, silent = false } = {}) {
       const jobs = [];
       if (stale) jobs.push(loadHome(), loadAccount());
       if (view === "insights" && (stale || !state.insights)) jobs.push(loadInsights());
+      if (view === "practice" && (stale || !practice.ready)) jobs.push(practice.load().then(() => { loadedAt.practice = Date.now(); }));
       if (view === "log" && (stale || !state.logReady)) {
         jobs.push(loadEntries({ cursor: state.logPages[state.logPage], page: state.logPage }));
       }
@@ -523,6 +525,11 @@ window.addEventListener("popstate", (event) => {
   }
   if (overlayInHistory && iv.saving) {
     history.pushState({ view: state.view, overlay: true }, '', location.hash);
+    return;
+  }
+  if (overlayInHistory && practice.active) {
+    history.pushState({ view: state.view, overlay: true }, '', location.hash);
+    practice.leave();
     return;
   }
   if (overlayInHistory) {
@@ -560,6 +567,7 @@ function render() {
   if (state.view === "now") view.innerHTML = viewNow();
   else if (state.view === "log") view.innerHTML = viewLog();
   else if (state.view === "insights") view.innerHTML = viewInsights();
+  else if (state.view === "practice") view.innerHTML = practice.view();
   else view.innerHTML = viewMe();
 }
 
@@ -1183,9 +1191,10 @@ function viewMe() {
       </button>
     </div>
 
-    <button class="card list-row" data-act="open-crisis" style="text-align:left">
-      <div><div class="label">${t("crisis.title")}</div><div class="sub">${t("crisis.note")}</div></div>
-      <span class="tiny">→</span>
+    <button class="support-entry" type="button" data-act="open-crisis">
+      <span class="support-entry-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 20s-7-4.4-7-9.3A4.2 4.2 0 0 1 12 7.5a4.2 4.2 0 0 1 7 3.2C19 15.6 12 20 12 20Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span class="support-entry-copy"><span class="support-entry-title">${t("crisis.title")}</span><span class="support-entry-hint">${t("crisis.entry_hint")}</span></span>
+      <svg class="support-entry-arrow" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
 
     <div class="stack gap-4" style="padding:4px 4px 0">
@@ -1237,6 +1246,7 @@ function focusFirst() {
 }
 
 function destroyOverlay() {
+  practice.dispose();
   iv.draft = null;
   iv.token += 1;
   iv.nodes = null;
@@ -1256,6 +1266,7 @@ function destroyOverlay() {
 
 function closeOverlay() {
   if (iv.saving) return;
+  if (practice.active) { practice.leave(); return; }
   const popNeeded = overlayInHistory;
   destroyOverlay();
   if (popNeeded) {
@@ -1663,6 +1674,7 @@ function renderClosing() {
     </div>
     <div class="focus-foot stack gap-8">
       <button class="btn block" data-act="note" data-autofocus>${t("note.add")}</button>
+      ${iv.entryId ? `<button class="btn soft block" data-act="entry-practice" data-id="${iv.entryId}">${t("practice.from_entry")}</button>` : ''}
       <button class="btn ghost block" data-act="close">${t("note.skip")}</button>
     </div>
   </div>`, { label: data.title });
@@ -1756,6 +1768,7 @@ async function openEditSheet(entryId, fromIntervention = false) {
 
     <div class="stack gap-8" style="margin-top:22px">
       <button class="btn block" data-act="save-note">${t("note.save")}</button>
+      ${!sheet.isDraft && !sheet.queue ? `<button class="btn soft block" data-act="save-note-practice">${t("practice.save_and_start")}</button>` : ''}
       ${sheet.queue ? `<p class="tiny">${t("log.queue_hint")}</p>` : ""}
     </div>
   </div>`, { label: `${meta.label} · ${t("note.title")}` });
@@ -1773,7 +1786,7 @@ function syncCharCount() {
   );
 }
 
-async function saveNote() {
+async function saveNote(startPractice = false) {
   const button = overlay.querySelector('[data-act="save-note"]');
   if (button && button.classList.contains("busy")) return;
   const textarea = overlay.querySelector('[data-input="cause"]');
@@ -1797,6 +1810,7 @@ async function saveNote() {
     await entriesChanged();
     if (queue) await completeNext(sheet.id);
     toast(t("note.saved"));
+    if (startPractice) { practice.link(updated.id); await nav("practice"); }
     // 本地已经改好，不必再整表重拉；只有账号里的记录数需要跟进
     loadAccount().catch(() => {});
   } catch (err) {
@@ -1957,6 +1971,7 @@ async function doReset() {
 
 async function switchLang(lang) {
   if (lang === getLang()) return;
+  practice.reset();
   try {
     localStorage.setItem("tether.lang", lang);
   } catch {
@@ -2009,6 +2024,7 @@ async function removeEntry(id) {
 所以这里只重绘 + 补一下账号里的记录数，不再整表重拉一遍。 */
 function closeAndSync() {
   if (iv.saving) return;
+  if (practice.active) { practice.leave(); return; }
   sheet.queue = false;
   closeOverlay();
   render();
@@ -2017,7 +2033,18 @@ function closeAndSync() {
   });
 }
 
+const practice = createPracticeController({
+  api, t, esc, getLang, tzOffset, overlay, render, open: openOverlay,
+  close: () => { closeOverlay(); render(); }, confirm: askConfirm, toast, support: openCrisis,
+});
+
 const ACTIONS = {
+  "entry-practice": async (node) => {
+    const id = Number(node.dataset.id);
+    closeOverlay();
+    practice.link(id);
+    await nav("practice");
+  },
   "refresh-data": async (node) => {
     node.disabled = true;
     try {
@@ -2061,6 +2088,7 @@ const ACTIONS = {
   },
   mic: () => startVoice(),
   "save-note": () => saveNote(),
+  "save-note-practice": () => saveNote(true),
   "delete-entry": (node) => removeEntry(Number(node.dataset.id)),
   filter: (node) => {
     state.filter.emotion = node.dataset.emotion;
@@ -2131,12 +2159,17 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const action = ACTIONS[node.dataset.act];
+  if (node.dataset.act.startsWith("p-")) {
+    try { await practice.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
+    return;
+  }
   if (action) {
     try { await action(node, event); } catch (err) { toast(err.message); }
   }
 });
 
 document.addEventListener("input", (event) => {
+  practice.input(event.target);
   if (event.target.name === 'new_password') {
     const value = event.target.value;
     const key = value.length < 8 ? 'auth.hint_pass' : value.length < 12 || new Set(value).size < 4 ? 'me.password_fair' : 'me.password_stronger';
@@ -2525,6 +2558,7 @@ document.addEventListener("submit", async (event) => {
 /* 会话在别的设备被踢掉、或过期时，任何一次请求都可能带回 401 */
 window.addEventListener("tether:unauthorized", () => {
   api.cancelPending();
+  practice.reset();
   ++homeSeq;
   ++accountSeq;
   for (const view of VIEWS) loadedAt[view] = 0;
@@ -2547,6 +2581,7 @@ async function doLogout() {
   try {
     await api.logout();
     api.cancelPending();
+    practice.reset();
     location.reload();
   } catch {
     toast(t("auth.logout_failed"));
@@ -2691,10 +2726,14 @@ async function boot() {
 }
 
 document.addEventListener("visibilitychange", () => {
+  if (document.hidden) practice.pause();
   if (!document.hidden && state.account) ensureViewData(state.view, { force: true, silent: true });
 });
 window.addEventListener("online", () => {
   if (!document.hidden && state.account) ensureViewData(state.view, { force: true, silent: true });
+});
+window.addEventListener("beforeunload", (event) => {
+  if (practice.isDirty()) { event.preventDefault(); event.returnValue = ''; }
 });
 setInterval(() => {
   if (!document.hidden && state.account) ensureViewData(state.view, { silent: true });
