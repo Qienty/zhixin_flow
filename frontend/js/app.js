@@ -1,4 +1,4 @@
-/* Tether — 前端主逻辑（无依赖、无构建） */
+/* 智心元流 — 前端主逻辑（无依赖、无构建） */
 
 import { api, setApiLang, tzOffset } from "./api.js";
 import { t, setLang, getLang, applyStaticText } from "./i18n.js";
@@ -2068,7 +2068,7 @@ const expression = createExpressionController({
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `tether-expression-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+    link.download = `智心元流-表达-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -2535,7 +2535,7 @@ function wheelCard() {
 
 /* --------------------------------------------------------------- 登录门 */
 
-/* 未登录可先在内存中表达，不拉取或上传账号记录。
+/* 登录页只提供账号入口，不展示表达空间，也不拉取账号记录。
    登录成功后整页重载一次，让所有状态从干净的地方开始。 */
 function renderAuth(mode = "login") {
   const isLogin = mode === "login";
@@ -2544,7 +2544,7 @@ function renderAuth(mode = "login") {
   if (!view) return;
   view.innerHTML = `<div class="auth-wrap stack gap-24">
     <div class="auth-masthead row-between">
-      <div class="brand"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 5v14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="24" r="3.4" fill="currentColor"/></svg><span class="brand-name">Tether</span></div>
+      <div class="brand"><img class="brand-mark" src="./icon.svg" width="42" height="42" alt="" aria-hidden="true" /><span class="brand-name">智心元流</span></div>
       <div class="language-switch" role="group" aria-label="${t("me.lang")}"><button class="${getLang() === "zh" ? "on" : ""}" aria-pressed="${getLang() === "zh"}" data-act="lang" data-lang="zh">中文</button><button class="${getLang() === "en" ? "on" : ""}" aria-pressed="${getLang() === "en"}" data-act="lang" data-lang="en">EN</button></div>
     </div>
     <section class="auth-intro stack gap-10">
@@ -2552,7 +2552,6 @@ function renderAuth(mode = "login") {
       <h1 class="display">${t("auth.headline")}</h1>
       <p class="small">${t("auth.slogan")}</p>
     </section>
-    ${expression.card()}
     <form class="card auth-card stack gap-16" data-auth-form data-mode="${mode}">
       <div class="stack gap-6"><h2 class="section-title">${isLogin ? t("auth.welcome") : t("auth.register_title")}</h2><p class="small">${t("auth.lede")}</p></div>
       <label class="stack gap-6">
@@ -2576,7 +2575,8 @@ function renderAuth(mode = "login") {
     </div>
     <p class="page-footnote tiny">${t("auth.footer")}</p>
   </div>`;
-  // Keep the free-expression entry in view instead of scrolling to the login form.
+  const first = view.querySelector("[data-autofocus]");
+  if (first && window.matchMedia("(hover: hover) and (pointer: fine)").matches) first.focus({ preventScroll: true });
 }
 
 document.addEventListener("submit", async (event) => {
@@ -2662,7 +2662,7 @@ async function doRedeem() {
 function openRedeem() {
   openOverlay(`<div class="sheet center">
     <div class="row-between" style="margin-bottom:6px">
-      <span class="eyebrow">Tether Pro</span>
+      <span class="eyebrow">智心元流 Pro</span>
       ${sheetClose()}
     </div>
     <h2 class="display sm" style="margin-bottom:8px">${t("redeem.title")}</h2>

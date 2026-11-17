@@ -1,4 +1,4 @@
-/* Tether interface copy */
+/* 智心元流 interface copy */
 const dict = {
   "zh": {
     "brand.caption": "给情绪一个落点",
@@ -37,7 +37,7 @@ const dict = {
     "now.empty_body": "可以先自由表达，也可以选一个情绪再记录。自由表达不会自动保存，练习由你选择。",
     "now.load_demo": "载入两周演示数据",
     "now.demo_note": "只是演示数据，随时可以在「我的」里清掉。",
-    "now.footer": "记录只属于你的账号 · Tether 不做诊断，也不是医疗服务",
+    "now.footer": "记录只属于你的账号 · 智心元流 不做诊断，也不是医疗服务",
     "log.title": "记录",
     "log.count": "{n} 条",
     "log.all": "全部",
@@ -93,7 +93,7 @@ const dict = {
     "crisis.sub": "这些资源永久免费，不需要订阅，也不在任何付费墙后。",
     "crisis.emergency": "急救",
     "crisis.find": "其他国家 / 地区",
-    "crisis.note": "Tether 不是医疗服务。如果你处于危险中，请联系当地急救或上面的热线。",
+    "crisis.note": "智心元流 不是医疗服务。如果你处于危险中，请联系当地急救或上面的热线。",
     "ins.title": "总结",
     "ins.window14": "近 14 天",
     "ins.window30": "近 30 天",
@@ -148,7 +148,7 @@ const dict = {
     "ai.privacy": "Pro 分析会把原因与备注的摘要发给模型服务，仅用于生成本页结论。",
     "auth.login_title": "登录",
     "auth.register_title": "创建账号",
-    "auth.lede": "想保存到账号、回看记录时，再登录。",
+    "auth.lede": "登录后表达感受、回看记录，按自己的节奏照顾自己。",
     "auth.username": "用户名",
     "auth.password": "密码",
     "auth.login": "登录",
@@ -220,7 +220,7 @@ const dict = {
     "me.reset_confirm": "确定清空全部情绪记录？此操作不可撤销。练习记录会保留，可在练习页单独删除。",
     "me.reset_ok": "清空",
     "me.about": "关于",
-    "me.about_body": "Tether 是情绪记录与自我调节工具，不做诊断、不做治疗，也不替代专业帮助。",
+    "me.about_body": "智心元流 是情绪记录与自我调节工具，不做诊断、不做治疗，也不替代专业帮助。",
     "me.version": "版本 {version} · 记录保存在部署服务器的 SQLite 数据库，按账号隔离，非端到端加密；服务器管理员可能访问。使用 HTTPS 部署时传输加密，导出文件请自行保管。",
     "pay.title": "解锁归因总结",
     "pay.lede": "免费层已经够用。这一层只是让记录变成能用的结论。",
@@ -274,7 +274,7 @@ const dict = {
     "me.seed_add": "追加演示记录",
     "me.import_json": "导入 JSON",
     "me.import_size": "文件不能超过 8 MiB",
-    "me.import_invalid": "请选择包含 1—5000 条记录的 Tether JSON 导出文件",
+    "me.import_invalid": "请选择包含 1—5000 条记录的 智心元流 JSON 导出文件",
     "me.import_confirm": "追加 {n} 条记录，完全相同的记录会跳过；现有数据不会删除。",
     "me.import_done": "已导入 {n} 条，跳过 {skipped} 条重复记录",
     "crisis.police": "拨打 110 · 报警",
@@ -319,7 +319,7 @@ const dict = {
     "now.empty_body": "Choose how you feel. Entries are saved after the guide or when you choose Save. You can leave a draft without saving.",
     "now.load_demo": "Load two weeks of demo data",
     "now.demo_note": "Demo data only — clear it any time from Me.",
-    "now.footer": "Entries belong to your account · Tether does not diagnose or treat",
+    "now.footer": "Entries belong to your account · 智心元流 does not diagnose or treat",
     "log.title": "Log",
     "log.count": "{n} entries",
     "log.all": "All",
@@ -375,7 +375,7 @@ const dict = {
     "crisis.sub": "Free forever. No subscription, never behind a paywall.",
     "crisis.emergency": "Emergency",
     "crisis.find": "Other countries",
-    "crisis.note": "Tether is not a medical service. If you are in danger, contact local emergency services or a line above.",
+    "crisis.note": "智心元流 is not a medical service. If you are in danger, contact local emergency services or a line above.",
     "ins.title": "Insights",
     "ins.window14": "Last 14 days",
     "ins.window30": "Last 30 days",
@@ -502,7 +502,7 @@ const dict = {
     "me.reset_confirm": "Delete all emotion entries? This cannot be undone. Practice records are kept and can be deleted from Practice.",
     "me.reset_ok": "Delete all",
     "me.about": "About",
-    "me.about_body": "Tether is an emotion-logging and self-regulation tool. No diagnosis, no treatment, not a substitute for professional care.",
+    "me.about_body": "智心元流 is an emotion-logging and self-regulation tool. No diagnosis, no treatment, not a substitute for professional care.",
     "me.version": "Version {version} · Stored in SQLite on the deployment server, separated by account. No end-to-end encryption; server administrators may access the database. HTTPS deployments encrypt traffic. Keep exported files private.",
     "pay.title": "Unlock attribution",
     "pay.lede": "The free tier is already usable. This layer turns logging into conclusions.",
@@ -556,7 +556,7 @@ const dict = {
     "me.seed_add": "Add demo entries",
     "me.import_json": "Import JSON",
     "me.import_size": "The file must be no larger than 8 MiB",
-    "me.import_invalid": "Choose a Tether JSON export with 1–5000 entries",
+    "me.import_invalid": "Choose a 智心元流 JSON export with 1–5000 entries",
     "me.import_confirm": "Append {n} entries. Exact duplicates are skipped and existing entries are kept.",
     "me.import_done": "Imported {n}; skipped {skipped} duplicates",
     "crisis.police": "Call 110 · Police",
@@ -763,7 +763,7 @@ Object.assign(dict.zh, {
   "express.save_confirm": "将这段内容保存到服务器？",
   "express.saving": "正在保存…",
   "express.retry": "重试本次保存",
-  "express.guest": "不登录也可以表达、整理和下载。若要保存到账号，请先下载保留文字，再登录后添加。",
+  "express.guest": "登录状态已失效。可先下载保留当前内容；重新登录后再保存到账号。",
   "express.save_failed": "尚未确认保存成功，服务器可能已收到请求。原稿仍在；重试会使用同一份内容，避免重复。也可以先下载保留。",
   "express.clear": "清除本次内容并结束",
   "express.close_note": "点关闭只返回上一页，原稿暂留本页内存；想立即移除，请选择“清除本次内容并结束”。",
@@ -791,7 +791,7 @@ Object.assign(dict.en, {
   "now.hint": "Write a little, or choose a feeling. You decide what happens next.",
   "now.primary_label": "Or start with a feeling",
   "now.empty_body": "Write freely or choose a feeling to record. Free expression is not saved automatically; guides are optional.",
-  "auth.lede": "Sign in when you want to save to your account and revisit entries.",
+  "auth.lede": "Sign in to express how you feel, revisit entries, and reflect at your own pace.",
   "note.quick1": "Exams or coursework",
   "note.quick4": "Uncertain about the future",
   "note.quick5": "Work or job hunting",
@@ -824,7 +824,7 @@ Object.assign(dict.en, {
   "express.save_confirm": "Save this writing to the server?",
   "express.saving": "Saving…",
   "express.retry": "Retry this save",
-  "express.guest": "You can write, reflect and download without signing in. To save to an account, download your text first, then sign in and add it.",
+  "express.guest": "Your session has expired. Download your current writing before signing in again to save it to your account.",
   "express.save_failed": "Saving is not confirmed; the server may have received the request. Your draft is still here. Retry uses the same content to prevent duplicates. You can also download a copy.",
   "express.clear": "Clear this writing and finish",
   "express.close_note": "Closing returns to the previous page and keeps your draft in memory. Choose Clear this writing and finish to remove it now.",
@@ -854,12 +854,12 @@ let current = "zh";
 /* 页面标题和 meta description 也要跟着语言走——英文用户之前会看到
 一个中文标签页标题，装到主屏之后那就是应用名。 */
 const DOC_TITLE = {
-  zh: "Tether · 情绪记录与自我调节",
-  en: "Tether · Log emotions, settle down",
+  zh: "智心元流 · 情绪记录与自我调节",
+  en: "智心元流 · Log emotions, settle down",
 };
 const DOC_DESC = {
-  zh: "Tether — 自由表达日常情绪，按自己的节奏整理想法。免登录先写，主动选择保存，也可尝试自助练习。",
-  en: "Tether — express everyday feelings and reflect at your own pace. Start without an account, choose whether to save, and explore optional practices.",
+  zh: "智心元流 — 自由表达日常情绪，按自己的节奏整理想法。登录后开始表达，主动选择保存，也可尝试自助练习。",
+  en: "智心元流 — express everyday feelings and reflect at your own pace. Sign in to express how you feel, choose whether to save, and explore optional practices.",
 };
 
 export function setLang(lang) {

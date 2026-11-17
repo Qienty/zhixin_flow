@@ -1,5 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#3E5B4B"/>
-  <path d="M256 128v160" stroke="#F6F3EC" stroke-width="30" stroke-linecap="round"/>
-  <circle cx="256" cy="352" r="52" fill="#F6F3EC"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>智心元流 · 心与流</title>
+  <defs>
+    <linearGradient id="moss" x1="9" y1="4" x2="54" y2="62" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#567B65"/>
+      <stop offset="1" stop-color="#304C3D"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="19" fill="url(#moss)"/>
+  <rect x=".75" y=".75" width="62.5" height="62.5" rx="18.25" stroke="#C4D8C8" stroke-opacity=".22" stroke-width="1.5"/>
+  <path d="M32 48.5C26 44.7 14 36 14 25.3C14 19.7 18.1 16 23.2 16C27.1 16 30 18.2 32 21.2C34 18.2 36.9 16 40.8 16C45.9 16 50 19.7 50 25.3C50 36 38 44.7 32 48.5Z"
+        stroke="#FAF5E9" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M21 33C25 28.5 28 38 33 34C36.5 31.2 39 29 43 31"
+        stroke="#B8D5BD" stroke-width="3.2" stroke-linecap="round"/>
+  <circle cx="41.5" cy="24.3" r="2.1" fill="#E6CC91"/>
 </svg>

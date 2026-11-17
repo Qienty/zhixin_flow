@@ -33,7 +33,7 @@ def _unique_code() -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="生成 Tether Pro 兑换码")
+    parser = argparse.ArgumentParser(description="生成 智心元流 Pro 兑换码")
     parser.add_argument("count", nargs="?", type=int, default=0, help="生成多少个")
     parser.add_argument("--uses", type=int, default=1, help="每个码可用次数，默认 1")
     parser.add_argument("--note", default="", help="备注")

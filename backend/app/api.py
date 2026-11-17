@@ -789,7 +789,7 @@ def export_practice_sessions(req: Request):
                             (req.user["id"],)).fetchall()
         return Response(payload={"exported_at": db.now_iso(), "count": len(rows),
                                  "practice_sessions": [_practice_payload(row, req.lang) for row in rows]},
-                        headers={"Content-Disposition": 'attachment; filename="tether-practices.json"'})
+                        headers={"Content-Disposition": 'attachment; filename="zhixinyuanliu-practices.json"'})
     finally:
         conn.close()
 
@@ -1175,12 +1175,12 @@ def export(req: Request):
             )
         return Response(
             raw="\ufeff" + buf.getvalue(),
-            headers={"Content-Disposition": 'attachment; filename="tether-entries.csv"'},
+            headers={"Content-Disposition": 'attachment; filename="zhixinyuanliu-entries.csv"'},
             content_type="text/csv; charset=utf-8",
         )
     return Response(
         payload={"exported_at": db.now_iso(), "count": len(rows), "entries": rows},
-        headers={"Content-Disposition": 'attachment; filename="tether-entries.json"'},
+        headers={"Content-Disposition": 'attachment; filename="zhixinyuanliu-entries.json"'},
     )
 
 

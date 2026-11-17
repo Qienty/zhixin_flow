@@ -33,7 +33,7 @@ mimetypes.add_type("application/json; charset=utf-8", ".json")
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"Tether/{__version__}"
+    server_version = f"ZhiXinYuanLiu/{__version__}"
     protocol_version = "HTTP/1.1"
 
     # -- 入口 --------------------------------------------------------------
@@ -113,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, b"forbidden", "text/plain; charset=utf-8")
             return
         if not target.is_file():
-            self._send(404, "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>404 · Tether</title><h1>页面不存在 / Page not found</h1><p>请检查地址，或使用浏览器返回上一页。</p></html>".encode("utf-8"), "text/html; charset=utf-8")
+            self._send(404, "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>404 · 智心元流</title><h1>页面不存在 / Page not found</h1><p>请检查地址，或使用浏览器返回上一页。</p></html>".encode("utf-8"), "text/html; charset=utf-8")
             return
         self._dev_page = target.name.startswith("__") and os.environ.get("TETHER_DEV_PAGES") == "1"
         if target.name.startswith("__") and not self._dev_page:
@@ -215,7 +215,7 @@ def main() -> None:
     db.init_db()
     httpd = Server((host, port), Handler)
     shown = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
-    print(f"\n  Tether · 情绪记录与自我调节")
+    print(f"\n  智心元流 · 情绪记录与自我调节")
     print(f"  监听 {host}:{port}")
     print(f"  http://{shown}:{port}")
     print(f"  API  http://{shown}:{port}/api/meta")

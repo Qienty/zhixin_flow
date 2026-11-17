@@ -1,7 +1,7 @@
 {
-  "name": "Tether · 情绪记录与自我调节",
-  "short_name": "Tether",
-  "description": "低摩擦记录、按严重程度排序、峰值时刻的 30 秒引导。",
+  "name": "智心元流 · 情绪记录与自我调节",
+  "short_name": "智心元流",
+  "description": "自由表达日常情绪，按自己的节奏整理想法。登录后开始表达，主动选择保存，也可尝试自助练习。",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

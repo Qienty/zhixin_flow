@@ -51,7 +51,7 @@
 
 - 与项目现有数据一样，记录位于服务器明文 SQLite 数据库中，按账号隔离，不是端到端加密；服务器或数据库管理员可能访问记录。
 - 不将回答或草稿写入 localStorage，service worker 不缓存 API 响应。
-- 练习导出是独立的 `tether-practices.json`。情绪 JSON/CSV 导出不包含练习，本版不支持练习导入。导出文件需要自行保管。
+- 练习导出是独立的 `zhixinyuanliu-practices.json`。情绪 JSON/CSV 导出不包含练习，本版不支持练习导入。导出文件需要自行保管。
 - 「清空情绪记录」保留练习；练习在足迹详情中逐条删除。
 
 ## 启动与验证
