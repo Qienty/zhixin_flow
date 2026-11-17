@@ -66,10 +66,20 @@ export function createPracticeController(env) {
       <p class="tiny practice-disclaimer">${tr('scope')}</p></div>`;
   }
   function rating(field, value) {
-    return `<fieldset class="practice-rating"><legend>${tr(field === 'before_score' ? 'before' : 'after')}</legend><p class="small">${tr('scale')}</p><div class="practice-score-buttons">${[1,2,3,4,5].map(n => button('score', String(n), 'practice-score' + (value === n ? ' on' : ''), `data-field="${field}" data-value="${n}" aria-pressed="${value === n}" aria-label="${tr('score_label', { n })}"`)).join('')}</div>${button('clear-score', tr('skip_score'), 'text-link', `data-field="${field}"`)}<p class="tiny">${tr(value == null ? 'score_skipped' : 'score_selected', { n: value })}</p></fieldset>`;
+    return `<fieldset class="practice-rating" data-rating="${field}"><legend>${tr(field === 'before_score' ? 'before' : 'after')}</legend><p class="small">${tr('scale')}</p><div class="practice-score-buttons">${[1,2,3,4,5].map(n => button('score', String(n), 'practice-score' + (value === n ? ' on' : ''), `data-field="${field}" data-value="${n}" aria-pressed="${value === n}" aria-label="${tr('score_label', { n })}"`)).join('')}</div>${button('clear-score', tr('skip_score'), 'text-link', `data-field="${field}"`)}<p class="tiny">${tr(value == null ? 'score_skipped' : 'score_selected', { n: value })}</p></fieldset>`;
   }
   function textInput(name, label, value) { return `<label class="practice-input">${esc(label)}<textarea data-practice-input="${name}" maxlength="500" rows="4" placeholder="${tr('optional')}">${esc(value || '')}</textarea><span class="tiny">${tr('text_limit')}</span></label>`; }
-  function present() {
+  function restoreControl(node) {
+    Array.from(env.overlay.querySelectorAll('button')).find(item => item.dataset.act === node.dataset.act && item.dataset.field === node.dataset.field && item.dataset.value === node.dataset.value)?.focus();
+  }
+  function updateRating(node) {
+    const field = node.dataset.field;
+    const group = env.overlay.querySelector(`[data-rating="${field}"]`);
+    if (group) group.outerHTML = rating(field, active[field]);
+    else present({ focus: false });
+    restoreControl(node);
+  }
+  function present({ focus = true } = {}) {
     if (!active) return;
     pause();
     const a = active, s = a.session, p = a.practice;
@@ -100,7 +110,7 @@ export function createPracticeController(env) {
       foot = button('close', tr('back'), 'btn block') + button('delete', t('common.delete'), 'text-link');
     }
     const err = error ? `<div class="practice-error" role="alert"><p>${esc(error)}</p>${conflict ? button('reopen', tr('reopen'), 'btn soft') : pending ? button('retry', t('common.retry'), 'btn soft') : ''}${pending ? button('discard', tr('leave_page'), 'text-link') : ''}</div>` : '';
-    env.open(`<div class="focus practice-focus"><div class="focus-head"><span class="eyebrow">${eyebrow}</span>${button('close', '×', 'icon-btn', `aria-label="${tr('save_exit')}"`)}</div><div class="focus-body">${body}</div>${err}<div class="focus-foot stack gap-8">${foot}${a.kind === 'session' ? button('close', tr('save_exit'), 'btn ghost block') : ''}<p class="tiny" role="status">${busy ? tr('saving') : a.kind === 'session' ? tr('checkpoint') : ''}</p></div></div>`, { label: p?.title || tr('title') });
+    env.open(`<div class="focus practice-focus"><div class="focus-head"><span class="eyebrow">${eyebrow}</span>${button('close', '×', 'icon-btn', `aria-label="${tr('save_exit')}"`)}</div><div class="focus-body">${body}</div>${err}<div class="focus-foot stack gap-8">${foot}${a.kind === 'session' ? button('close', tr('save_exit'), 'btn ghost block') : ''}<p class="tiny" role="status">${busy ? tr('saving') : a.kind === 'session' ? tr('checkpoint') : ''}</p></div></div>`, { focus, label: p?.title || tr('title') });
     env.overlay.querySelectorAll('button, textarea').forEach(node => { if (busy || (pending && !['p-retry','p-reopen','p-discard'].includes(node.dataset.act))) node.disabled = true; });
     updateTimer();
   }
@@ -116,6 +126,7 @@ export function createPracticeController(env) {
     try {
       const result = job.type === 'start' ? await api.startPractice(job.body) : await api.updatePractice(job.id, job.body);
       if (owner !== epoch || pending !== job) return;
+      if (job.type === 'start') linkedId = null;
       pending = null; busy = false; accept(result, job.body.status === 'completed' || job.body.status === 'stopped');
       if (job.after) job.after(); else present();
       void load();
@@ -178,9 +189,9 @@ export function createPracticeController(env) {
       if (id && await env.confirm({ title: tr('reopen'), body: tr('reopen_note'), ok: tr('reopen') })) return openSession(id);
     } else if (action === 'close') return leave();
     else if (action === 'timer') toggleTimer();
-    else if (action === 'score' && active) { active[node.dataset.field] = active[node.dataset.field] === Number(node.dataset.value) ? null : Number(node.dataset.value); present(); }
-    else if (action === 'clear-score' && active) { active[node.dataset.field] = null; present(); }
-    else if (action === 'relief' && active) { active.relief = active.relief === node.dataset.value ? null : node.dataset.value; present(); }
+    else if (action === 'score' && active) { active[node.dataset.field] = active[node.dataset.field] === Number(node.dataset.value) ? null : Number(node.dataset.value); updateRating(node); }
+    else if (action === 'clear-score' && active) { active[node.dataset.field] = null; updateRating(node); }
+    else if (action === 'relief' && active) { active.relief = active.relief === node.dataset.value ? null : node.dataset.value; present({ focus: false }); restoreControl(node); }
     else if (action === 'next' && active?.kind === 'session') return save({ step_index: active.session.step_index + 1 });
     else if (action === 'finish' && active?.kind === 'session') return save({ status: 'completed' });
     else if (action === 'stop' && active?.kind === 'session') {

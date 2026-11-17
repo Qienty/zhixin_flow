@@ -1,23 +1,6 @@
 """HTTP API（纯标准库实现，无第三方依赖）。
 
-路由表与上一版 FastAPI 完全一致：
-    POST   /api/entries
-    GET    /api/entries
-    GET    /api/entries/{id}
-    PATCH  /api/entries/{id}
-    DELETE /api/entries/{id}
-    POST   /api/entries/{id}/intervention
-    GET    /api/interventions/{emotion}
-    GET    /api/stats/basic
-    GET    /api/insights
-    GET    /api/account
-    POST   /api/account/subscription
-    PATCH  /api/account/settings
-    GET    /api/crisis
-    GET    /api/export
-    POST   /api/demo/seed
-    GET    /api/meta
-    GET    /api/health
+接口清单见 README.md；实际路由由本文件的 @router.route 声明维护。
 """
 
 from __future__ import annotations
@@ -32,7 +15,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import __version__, ai, auth, content, db, insights, practices, seed
+from . import __version__, ai, auth, content, db, insights, practices, seed, limits
 
 # 没有订阅、没有支付：Pro 只能靠兑换码开通（见 auth.redeem）
 
@@ -343,13 +326,18 @@ def import_entries(req: Request):
     added = 0
     try:
         conn.execute("BEGIN IMMEDIATE")
+        fields = ("occurred_at", "emotion", "severity", "cause", "note", "tz_offset", "intervention_completed", "relief")
+        times = [row["occurred_at"] for row in rows]
+        wanted = {tuple(row[field] for field in fields) for row in rows}
+        existing = {key for row in conn.execute(
+            "SELECT " + ", ".join(fields) + " FROM entries INDEXED BY idx_entries_time WHERE user_id = ? AND occurred_at BETWEEN ? AND ?",
+            (uid, min(times), max(times)),
+        ) if (key := tuple(row)) in wanted}
         for row in rows:
-            existing = conn.execute(
-                "SELECT id FROM entries WHERE user_id = ? AND occurred_at = ? AND emotion = ? AND severity IS ? AND cause = ? AND note = ? AND tz_offset = ? AND intervention_completed = ? AND relief IS ? LIMIT 1",
-                (uid, row["occurred_at"], row["emotion"], row["severity"], row["cause"], row["note"], row["tz_offset"], row["intervention_completed"], row["relief"]),
-            ).fetchone()
-            if not existing:
+            key = tuple(row[field] for field in fields)
+            if key not in existing:
                 _insert_entry(row, uid, conn)
+                existing.add(key)
                 added += 1
         conn.commit()
     finally:
@@ -870,6 +858,7 @@ def _ai_state(entries: list[dict], days: int, lang: str, rules: dict, plan: str,
         "summary": narrative.get("summary") or "",
         "next_step": narrative.get("next_step") or "",
         "focus": narrative.get("focus") or {},
+        "reminders": narrative.get("reminders") or [],
     }
 
 
@@ -928,9 +917,10 @@ def analyze_insights(req: Request):
 
     if narrative is None:
         try:
-            narrative = ai.analyze(entries, days, lang, rules)
-            if not ai.cache_put(fingerprint, narrative, cfg["model"], req.user["id"], revision):
-                raise ApiError(409, "记录已变化，请刷新后重新分析" if lang == "zh" else "Entries changed. Refresh before analyzing again.")
+            with limits.analysis_slot(req.user["id"]):
+                narrative = ai.analyze(entries, days, lang, rules)
+                if not ai.cache_put(fingerprint, narrative, cfg["model"], req.user["id"], revision):
+                    raise ApiError(409, "记录已变化，请刷新后重新分析" if lang == "zh" else "Entries changed. Refresh before analyzing again.")
         except ai.AIError as exc:
             error = str(exc)
 
@@ -953,6 +943,7 @@ def analyze_insights(req: Request):
         "next_step": narrative.get("next_step") or "",
         "focus": narrative.get("focus") or {},
         "cached": from_cache,
+        "reminders": narrative.get("reminders") or [],
     }
     return rules
 
@@ -989,6 +980,7 @@ def _session_response(user: dict) -> Response:
 
 @router.route("POST", "/api/auth/register")
 def register(req: Request):
+    limits.registration_attempt(req.client_ip)
     body = req.json()
     user = auth.create_user(_clean_text(body.get("username"), 24), _clean_password(body.get("password")))
     return _session_response(user)
@@ -1113,7 +1105,11 @@ def put_wheel(req: Request):
     limit = content.WHEEL_LIMITS
     labels: list[str] = []
     for item in raw:
-        text = item if isinstance(item, str) else (item or {}).get("label")
+        if not isinstance(item, (str, dict)):
+            raise ApiError(422, "each item must be a string or an object with a string label")
+        text = item if isinstance(item, str) else item.get("label")
+        if not isinstance(text, str):
+            raise ApiError(422, "label must be a string")
         cleaned = _clean_text(text, limit["label"])
         if cleaned:
             labels.append(cleaned)
@@ -1239,6 +1235,8 @@ def dispatch(req: Request) -> Response:
         return Response(payload=result)
     except ApiError as exc:
         return Response(status=exc.status, payload={"error": exc.message})
+    except limits.LimitError as exc:
+        return Response(status=429, payload={"error": str(exc)}, headers={"Retry-After": str(exc.retry_after)})
     except auth.AuthError as exc:
         headers = {"Retry-After": str(exc.retry_after)} if hasattr(exc, "retry_after") else {}
         return Response(status=exc.status, payload={"error": exc.message}, headers=headers)

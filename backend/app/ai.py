@@ -21,7 +21,7 @@ import pathlib
 import time
 import urllib.error
 import urllib.request
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from . import db
 
@@ -500,7 +500,8 @@ def cache_prune(connection=None) -> None:
     conn = connection or db.connect()
     try:
         cutoff = (db.now_utc() - timedelta(hours=CACHE_TTL_HOURS)).isoformat(timespec="seconds")
-        conn.execute("DELETE FROM ai_cache WHERE julianday(created_at) IS NULL OR julianday(created_at) <= julianday(?)", (cutoff,))
+        conn.execute("DELETE FROM ai_cache WHERE julianday(created_at) IS NULL")
+        conn.execute("DELETE FROM ai_cache WHERE julianday(created_at) <= julianday(?)", (cutoff,))
         if connection is None:
             conn.commit()
     finally:
@@ -520,16 +521,20 @@ def data_revision(user_id: int) -> int:
 def cache_get(key: str, user_id: int) -> dict | None:
     conn = db.connect()
     try:
-        cache_prune(conn)
-        row = conn.execute("SELECT payload FROM ai_cache WHERE key = ? AND user_id = ?", (key, user_id)).fetchone()
-        conn.commit()
+        row = conn.execute("SELECT payload, created_at FROM ai_cache WHERE key = ? AND user_id = ?", (key, user_id)).fetchone()
     finally:
         conn.close()
     if not row:
         return None
     try:
+        created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        now = db.now_utc()
+        if not now - timedelta(hours=CACHE_TTL_HOURS) < created <= now:
+            return None
         return json.loads(row["payload"])
-    except ValueError:
+    except (ValueError, TypeError, AttributeError):
         return None
 
 
@@ -542,7 +547,6 @@ def cache_put(key: str, narrative: dict, model: str, user_id: int, revision: int
         if row is None or row["data_revision"] != revision:
             conn.rollback()
             return False
-        cache_prune(conn)
         conn.execute(
             "INSERT INTO ai_cache(key, payload, model, created_at, user_id) VALUES(?, ?, ?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, "

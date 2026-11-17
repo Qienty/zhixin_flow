@@ -25,11 +25,16 @@ def _block(n: int = 4) -> str:
     return "".join(secrets.choice(ALPHABET) for _ in range(n))
 
 
-def _unique_code() -> str:
-    while True:
+def generate_code(*, max_uses: int = 1, note: str = "") -> str:
+    """Reserve a code atomically; a concurrent generator cannot claim it."""
+    for _ in range(10):
         code = f"QNTY-{_block()}-{_block()}"
-        if not any(row["code"] == code for row in auth.list_codes()):
-            return code
+        try:
+            return auth.create_code(code, plan="pro", max_uses=max_uses, note=note)
+        except auth.AuthError as exc:
+            if exc.status != 409:
+                raise
+    raise RuntimeError("Could not allocate a unique code after 10 attempts")
 
 
 def main() -> int:
@@ -53,7 +58,7 @@ def main() -> int:
         return 0
 
     for _ in range(args.count):
-        print(auth.create_code(_unique_code(), plan="pro", max_uses=args.uses, note=args.note))
+        print(generate_code(max_uses=args.uses, note=args.note))
     return 0
 
 

@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from app import ai, api, auth, content, db, insights
+from app import ai, api, auth, content, db, insights, limits
 
 
 class Regressions(unittest.TestCase):
@@ -30,6 +30,7 @@ class Regressions(unittest.TestCase):
         self.users = [auth.create_user(f"test_user_{i}", "Test-only!SeCrEt42") for i in range(2)]
         self.tokens = [auth.create_session(user["id"])[0] for user in self.users]
         auth._login_fails.clear()
+        limits.reset()
 
     def request(self, method, path, body=None, user=0, query=None):
         req = api.Request(method, path, query or {"tz_offset": ["480"]}, json.dumps(body).encode() if body is not None else b"",

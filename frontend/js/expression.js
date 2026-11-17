@@ -21,6 +21,7 @@ export function createExpressionController({
   let busy = false;
   let pending = null;
   let error = "";
+  let epoch = 0;
   const dirty = () => Object.keys(EXPRESSION_FIELDS).some(key => draft[key].trim());
   const field = (key, id) => `<label class="stack gap-8" for="${id}">
     <span class="field-label">${t("express." + (key === "text" ? "label" : key))}</span>
@@ -105,9 +106,11 @@ export function createExpressionController({
     if (!dirty()) { toast(t("express.text_required")); return; }
     if (!getEmotions().some(e => e.key === draft.emotion)) { toast(t("express.emotion_required")); return; }
     busy = true;
+    const owner = epoch;
     try {
       if (!pending) {
         if (!await confirm({ title: t("express.save_confirm"), body: t("express.server_note"), ok: t("express.save") })) return;
+        if (owner !== epoch) return;
         // Freeze the complete request, not just its ID: retries must be identical.
         pending = { emotion: draft.emotion, cause: draft.text.trim(), note: expressionNote(draft, t),
           tz_offset: tzOffset(), occurred_at: new Date().toISOString(),
@@ -118,15 +121,17 @@ export function createExpressionController({
       paint();
       await api.createEntry({ ...pending });
     } catch (err) {
+      if (owner !== epoch) return;
       error = err.message;
       return;
     } finally {
-      busy = false;
-      if (active && (pending || error)) {
+      if (owner === epoch) busy = false;
+      if (owner === epoch && active && error) {
         paint();
         if (error) overlay.querySelector('[data-act="e-save"]')?.focus();
       }
     }
+    if (owner !== epoch) return;
     draft = empty();
     pending = null;
     error = "";
@@ -161,7 +166,8 @@ export function createExpressionController({
     }
   }
 
-  function reset() { draft = empty(); pending = null; error = ""; active = false; busy = false; }
-  return { card, handle, input, change, isDirty: dirty, reset, detach: () => { active = false; },
+  function suspend() { ++epoch; active = false; busy = false; }
+  function reset() { suspend(); draft = empty(); pending = null; error = ""; }
+  return { card, handle, input, change, isDirty: dirty, reset, suspend, detach: () => { active = false; },
     get active() { return active; }, get busy() { return busy; } };
 }

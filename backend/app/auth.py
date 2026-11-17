@@ -211,7 +211,9 @@ def authenticate(username: str, password: str) -> dict:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     finally:
         conn.close()
-    if not row or not verify_password(password, row["pass_salt"], row["pass_hash"]):
+    # Unknown accounts spend the same scrypt work and receive the same public error.
+    valid = verify_password(password, row["pass_salt"] if row else "0" * 32, row["pass_hash"] if row else "0" * 64)
+    if not row or not valid:
         raise AuthError(401, "用户名或密码不对")
     return _row_to_user(row)
 
@@ -343,7 +345,9 @@ def create_code(code: str, plan: str = "pro", max_uses: int = 1, note: str = "")
             (code, plan, max(1, max_uses), note, db.now_iso()),
         )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as exc:
+        if "UNIQUE constraint failed: redeem_codes.code" not in str(exc):
+            raise
         raise AuthError(409, f"兑换码 {code} 已存在") from None
     finally:
         conn.close()

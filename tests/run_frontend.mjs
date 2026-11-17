@@ -40,10 +40,11 @@ function client(fetch) {
 function element() {
   const classes = new Set();
   return {
-    hidden: false, disabled: false, value: "", textContent: "", innerHTML: "", style: {},
+    hidden: false, disabled: false, value: "", textContent: "", innerHTML: "", style: {}, dataset: {}, childNodes: [],
     classList: { add: (s) => classes.add(s), remove: (s) => classes.delete(s), contains: (s) => classes.has(s), toggle() {} },
     querySelector: () => null, querySelectorAll: () => [], matches: () => false,
-    setAttribute() {}, removeAttribute() {}, focus() {}, scrollIntoView() {},
+    setAttribute() {}, getAttribute() { return null; }, removeAttribute() {}, focus() {}, scrollIntoView() {}, contains: () => false,
+    replaceChildren(...children) { this.childNodes = children; }, appendChild() {},
   };
 }
 
@@ -67,6 +68,7 @@ function app(overrides = {}) {
     addEventListener: (name, fn) => events.set(name, fn) };
   const document = { hidden: false, activeElement: null, body: element(), documentElement: element(),
     querySelector: node, querySelectorAll: () => [], contains: () => false,
+    createElement: () => ({ ...element(), querySelector: node }),
     addEventListener: (name, fn) => events.set(name, fn) };
   const context = vm.createContext({
     api, document, window, Date, Intl, AbortController, URL, URLSearchParams, crypto: webcrypto,
@@ -76,9 +78,10 @@ function app(overrides = {}) {
     t: (key) => key, getLang: () => "zh", tzOffset: () => 480, messages,
   });
   vm.runInContext(plain(expressionSource) + '\n' + plain(practiceSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
-    render = () => {}; renderAuth = () => {}; renderLogList = () => {};
+    globalThis.renders = 0;
+    render = () => { ++globalThis.renders; }; renderAuth = () => {}; renderLogList = () => {};
     toast = (message) => messages.push(message);
-    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay, expression };
+    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay, expression, practice, wheel };
   `, context);
   Object.assign(context.hooks.state, { account: { user: { id: 1 } }, home: { local_today: today }, logReady: true, insights: { old: true } });
   context.hooks.overlay.hidden = true;
@@ -274,7 +277,7 @@ test("An old insights read cannot overwrite a newer AI analysis", async () => {
 
 function expressionFixture({ account = { user: { id: 1 } }, confirm = true, create, changed, language = "zh" } = {}) {
   const calls = [], downloads = [], messages = [];
-  const display = { html: "", closed: false };
+  const display = { html: "", closed: false, paints: [] };
   const context = vm.createContext({ crypto: webcrypto, Date, document: { documentElement: {}, querySelector: () => null } });
   vm.runInContext(plain(i18nSource) + '\n' + plain(expressionSource) + '\nglobalThis.make = createExpressionController;', context);
   context.setLang(language);
@@ -282,7 +285,7 @@ function expressionFixture({ account = { user: { id: 1 } }, confirm = true, crea
     api: { createEntry: async payload => { calls.push(payload); return create ? create(payload) : { entry: { id: 1 } }; } },
     t: context.t, esc: text => String(text).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('\"', '&quot;'),
     getAccount: () => account, getEmotions: () => [{ key: "anxiety", label: "焦虑" }], tzOffset: () => 480,
-    overlay: { querySelector: () => null }, open: html => { display.html = html; }, close: () => { display.closed = true; },
+    overlay: { querySelector: () => null }, open: html => { display.html = html; display.paints.push(html); }, close: () => { display.closed = true; },
     confirm: async () => confirm, toast: message => messages.push(message), render() {},
     changed: changed || (async () => {}), download: text => downloads.push(text),
   });
@@ -411,6 +414,141 @@ test("Picking a feeling offers a choice without starting a guide or saving", asy
   assert.ok(a.hooks.overlay.innerHTML.includes('data-act="guide-start"'));
   assert.ok(!a.hooks.overlay.innerHTML.includes('data-act="iv-next"'));
   assert.equal(a.hooks.iv.draft.emotion, "anxiety");
+});
+
+test("Cancelling analysis preserves an existing result and does not report failure", async () => {
+  const a = app({ analyzeInsights: async () => { throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); } });
+  a.hooks.state.insights = { ai: { status: 'ready', summary: 'keep this result' } };
+  await a.context.runAnalysis();
+  assert.equal(a.hooks.state.insights.ai.summary, 'keep this result');
+  assert.equal(a.hooks.state.insights.ai.status, 'ready');
+  assert.equal(a.hooks.state.aiError, '');
+  assert.equal(a.hooks.state.aiBusy, false);
+});
+
+test("A failed first log load exposes a retry instead of permanent skeletons", async () => {
+  let fail = true;
+  const a = app({ entries: async () => { if (fail) throw new Error('<offline>'); return { items: [], total: 0 }; } });
+  a.hooks.state.logReady = false;
+  await assert.rejects(a.context.loadEntries(), /offline/);
+  const html = a.context.entryListHtml([]);
+  assert.ok(html.includes('data-act="retry-log"'));
+  assert.ok(html.includes('&lt;offline&gt;'));
+  assert.ok(!html.includes('skeleton'));
+  fail = false; await a.hooks.ACTIONS['retry-log']();
+  assert.equal(a.hooks.state.logReady, true); assert.equal(a.hooks.state.logError, '');
+});
+
+test("A background refresh does not remove input focused during its request", async () => {
+  const waiting = deferred();
+  const a = app({ home: () => waiting.promise });
+  const result = a.context.ensureViewData('now', { force: true });
+  a.document.activeElement = { matches: () => true };
+  waiting.resolve({ total: 12, items: [], local_today: a.hooks.state.home.local_today });
+  await result;
+  assert.equal(a.hooks.state.home.total, 12);
+  assert.equal(a.context.renders, 0);
+});
+
+test("Session expiry closes a busy expression and ignores its late save result", async () => {
+  const waiting = deferred(), entered = deferred();
+  const a = app({ createEntry: () => { entered.resolve(); return waiting.promise; } });
+  a.hooks.state.meta = { emotions: [{ key: 'anxiety' }] };
+  // The controller captured the real confirmation function; approve its layer below.
+  a.hooks.expression.input({ dataset: { expressionField: 'text' }, value: 'recover this draft', closest: () => null });
+  a.hooks.expression.change({ matches: () => true, value: 'anxiety' });
+  await a.hooks.expression.handle('open');
+  const saving = a.hooks.expression.handle('save');
+  a.context.settleConfirm(true);
+  await entered.promise;
+  assert.equal(a.hooks.expression.busy, true);
+  a.events.get('tether:unauthorized')();
+  assert.equal(a.hooks.overlay.hidden, true);
+  assert.equal(a.hooks.expression.busy, false);
+  assert.equal(a.hooks.expression.isDirty(), true);
+  waiting.resolve({ entry: { id: 1 } }); await saving;
+  assert.equal(a.hooks.expression.isDirty(), true);
+  assert.equal(a.hooks.overlay.hidden, true);
+  assert.equal(a.hooks.state.account, null);
+});
+
+test("Expression suspend retains a downloadable draft without late repaint", async () => {
+  const waiting = deferred(), entered = deferred(), f = expressionFixture({ create: () => { entered.resolve(); return waiting.promise; } });
+  f.input('text', 'retain me'); f.emotion('anxiety'); await f.controller.handle('open');
+  const saving = f.controller.handle('save'); await entered.promise;
+  f.controller.suspend(); const paints = f.display.paints.length;
+  waiting.reject(new Error('expired')); await saving;
+  await f.controller.handle('download');
+  assert.equal(f.display.paints.length, paints); assert.equal(f.controller.busy, false);
+  assert.equal(f.downloads.length, 1); assert.ok(f.downloads[0].includes('retain me'));
+});
+
+test("Successful expression saving does not repaint a retry form", async () => {
+  const f = expressionFixture(); f.input('text', 'one save'); f.emotion('anxiety');
+  await f.controller.handle('open'); const before = f.display.paints.length;
+  await f.controller.handle('save');
+  assert.equal(f.display.paints.length, before + 1); // only the busy state
+  assert.equal(f.display.closed, true);
+});
+
+test("Closing nested crisis resources restores the same guide nodes and draft", async () => {
+  const waiting = deferred(), a = app({ crisis: () => waiting.promise });
+  const original = { textareaValue: 'unchanged' };
+  a.hooks.iv.draft = { client_id: 'stable' }; a.hooks.overlay.hidden = false;
+  a.hooks.overlay.childNodes = [original];
+  const opening = a.context.openCrisis();
+  a.context.closeOverlay();
+  assert.equal(a.hooks.overlay.childNodes[0], original);
+  assert.equal(a.hooks.iv.draft.client_id, 'stable');
+  const restored = a.hooks.overlay.innerHTML;
+  waiting.resolve({ label: 'late', lines: [] }); await opening;
+  assert.equal(a.hooks.overlay.innerHTML, restored);
+  assert.equal(a.hooks.overlay.hidden, false);
+});
+
+test("Guide timers pause while nested resources are open", async () => {
+  const waiting = deferred(), a = app({ crisis: () => waiting.promise });
+  const frames = [], elapsed = [];
+  a.context.performance = { now: () => 0 };
+  a.context.requestAnimationFrame = callback => frames.push(callback);
+  a.hooks.iv.draft = { client_id: 'timer' }; a.hooks.overlay.hidden = false;
+  a.context.ticker(10, a.hooks.iv.token, seconds => elapsed.push(seconds));
+  frames.shift()(1000);
+  const opening = a.context.openCrisis();
+  frames.shift()(5000);
+  assert.deepEqual(elapsed, [1]);
+  a.context.closeOverlay(); frames.shift()(6000);
+  assert.deepEqual(elapsed, [1, 2]);
+  waiting.resolve({ label: 'late', lines: [] }); await opening;
+});
+
+test("AI summary, explanation and separate reminders are safely rendered", async () => {
+  const a = app(), payload = '<img src=x onerror=alert(1)>';
+  const ai = a.context.aiCard({ ai: { status: 'ready', summary: payload, reminders: [payload] } });
+  assert.equal((ai.match(/&lt;img/g) || []).length, 2);
+  const pattern = a.context.patternCard({ key: 'x', title: 'x', body: '', evidence: [] }, false, true, '', payload);
+  assert.ok(pattern.includes('&lt;img')); assert.ok(!pattern.includes('<img'));
+});
+
+test("Repeated guide keyboard shortcuts never advance and timezone labels use minutes", async () => {
+  const a = app(); let advanced = 0;
+  a.node('#confirm').hidden = true; a.hooks.overlay.hidden = false;
+  a.hooks.overlay.querySelector = () => ({ click() { ++advanced; } });
+  for (const key of ['Enter', ' ']) a.events.get('keydown')({ key, repeat: true, target: { matches: () => false }, preventDefault() {} });
+  assert.equal(advanced, 0);
+  for (const [minutes, expected] of [[330, 'UTC+05:30'], [345, 'UTC+05:45'], [-210, 'UTC-03:30'], [0, 'UTC+00:00']]) assert.equal(a.context.offsetLabel(minutes), expected);
+});
+
+test("Service worker precache failure rejects install before taking over", async () => {
+  const handlers = new Map(), calls = []; let install;
+  const context = vm.createContext({ URL,
+    self: { registration: { scope: 'https://test.invalid/qienty/' }, addEventListener: (type, fn) => handlers.set(type, fn), skipWaiting: () => calls.push('skip'), clients: { claim: () => calls.push('claim') } },
+    caches: { open: async () => ({ addAll: async () => { throw new Error('missing shell'); } }), keys: async () => ['old'], delete: async () => calls.push('delete') },
+  });
+  vm.runInContext(await read('frontend/sw.js'), context);
+  handlers.get('install')({ waitUntil: promise => { install = promise; } });
+  await assert.rejects(install, /missing shell/);
+  assert.deepEqual(calls, []);
 });
 
 let failures = 0;

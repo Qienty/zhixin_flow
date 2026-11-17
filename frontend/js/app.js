@@ -30,6 +30,7 @@ const viewRefreshes = new Map();
 let homeSeq = 0;
 let accountSeq = 0;
 let logoutBusy = false;
+let sessionExpired = false;
 
 const state = {
   view: "now",
@@ -46,6 +47,7 @@ const state = {
   logPages: [null],
   logPage: 0,
   logBusy: false,
+  logError: "",
   insights: null,
   stats: null,
   /* AI 只在用户点击分析后运行，统计始终可以直接查看。 */
@@ -152,12 +154,9 @@ const sevLabel = (n) => SEV_LABEL[getLang()][n] || "";
 
 const locale = () => (getLang() === "zh" ? "zh-CN" : "en-US");
 
-function fmtTime(iso) {
-  return timeLabels(iso).time;
-}
-
-function fmtDay(iso) {
-  return timeLabels(iso).day;
+function offsetLabel(minutes = 0) {
+  const absolute = Math.abs(minutes);
+  return "UTC" + (minutes >= 0 ? "+" : "-") + String(Math.floor(absolute / 60)).padStart(2, "0") + ":" + String(absolute % 60).padStart(2, "0");
 }
 
 function entryTime(entry) {
@@ -275,15 +274,40 @@ function cycleTheme() {
     /* 无痕模式：只在本次会话生效 */
   }
   applyTheme();
-  render();
+  renderTheme();
   toast(t(`theme.${theme.pref}`));
 }
 
 darkQuery.addEventListener("change", () => {
   if (theme.pref !== "auto") return;
   applyTheme();
-  render();
+  renderTheme();
 });
+
+function renderTheme() {
+  const root = $("#view"), focused = document.activeElement;
+  const authForm = root.querySelector("[data-auth-form]");
+  const authFields = authForm ? Array.from(authForm.querySelectorAll("input[name]"))
+    .map(node => ({ name: node.name, value: node.value })) : [];
+  const attrs = ["id", "name", "data-act", "data-theme", "data-field", "data-value"];
+  const identity = focused && root.contains(focused) ? attrs.map(key => focused.getAttribute(key)) : null;
+  const selection = identity && typeof focused.selectionStart === "number"
+    ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
+  if (authForm && !state.account) {
+    renderAuth(authForm.dataset.mode);
+    for (const field of authFields) {
+      const input = Array.from(root.querySelectorAll("input[name]")).find(node => node.name === field.name);
+      if (input) input.value = field.value;
+    }
+  } else render();
+  if (!identity || !identity.some(Boolean)) return;
+  const replacement = Array.from(root.querySelectorAll("input, textarea, select, button, a"))
+    .find(node => node.tagName === focused.tagName && attrs.every((key, i) => node.getAttribute(key) === identity[i]));
+  if (replacement) {
+    replacement.focus({ preventScroll: true });
+    if (selection) replacement.setSelectionRange(...selection);
+  }
+}
 
 /* --------------------------------------------------------------- 数据层 */
 
@@ -323,6 +347,7 @@ let logSeq = 0;
 async function loadEntries({ cursor = null, page = 0 } = {}) {
   const seq = ++logSeq;
   state.logBusy = true;
+  state.logError = "";
   try {
     const res = await api.entries({ ...state.filter, limit: PAGE_SIZE, cursor });
     if (seq !== logSeq) return;
@@ -334,7 +359,15 @@ async function loadEntries({ cursor = null, page = 0 } = {}) {
     if (!page) state.logPages = [null];
     state.logPages[page + 1] = res.next_cursor;
     loadedAt.log = Date.now();
-  } finally { if (seq === logSeq) state.logBusy = false; }
+  } catch (err) {
+    if (seq === logSeq && err.name !== "AbortError") state.logError = err.message;
+    throw err;
+  } finally {
+    if (seq === logSeq) {
+      state.logBusy = false;
+      if (state.view === "log" && !sessionExpired) renderLogList();
+    }
+  }
 }
 async function loadHome() {
   const seq = ++homeSeq;
@@ -411,6 +444,7 @@ async function runAnalysis({ force = false } = {}) {
     if (payload.ai && payload.ai.status === "error") state.aiError = payload.ai.message || "";
   } catch (err) {
     if (seq !== aiSeq) return;
+    if (err.name === "AbortError") return;
     state.aiError = err.message;
     if (state.insights?.ai) state.insights.ai.status = "error";
   } finally {
@@ -503,7 +537,9 @@ async function ensureViewData(view, { force = false, silent = false } = {}) {
       }
       await Promise.all(jobs);
       if (!state.account) return false;
-      if (jobs.length && state.view === view) render();
+      // Focus can change while requests are in flight. Recheck before replacing DOM.
+      if (jobs.length && state.view === view && overlay.hidden &&
+          !document.activeElement?.matches("input, textarea, select")) render();
       return true;
     } catch (err) {
       if (!silent && err.name !== "AbortError") toast(err.message);
@@ -524,6 +560,8 @@ window.addEventListener("popstate", (event) => {
     pendingPop -= 1;
     return;
   }
+  if (restoreCrisis()) return;
+  if (sessionExpired) { renderAuth(); return; }
   if (overlayInHistory && (iv.saving || expression.busy)) {
     history.pushState({ view: state.view, overlay: true }, '', location.hash);
     return;
@@ -559,6 +597,7 @@ function loadingBlock() {
 }
 
 function render() {
+  if (sessionExpired) { renderAuth(); return; }
   const view = $("#view");
   if (!state.meta) {
     view.innerHTML = loadingBlock();
@@ -701,7 +740,7 @@ function viewNow() {
 /* ------------------------------------------------------------- 记录视图 */
 
 /* 计数与筛选由服务端完成，不受当前页大小影响。 */
-function countLabel(list) {
+function countLabel() {
   return t("log.count", { n: state.logTotal });
 }
 
@@ -711,9 +750,10 @@ function filteredEntries() {
 
 /* 时间排序按日期分组；强度排序按分值分组，保留强度优先。 */
 function entryListHtml(list) {
-  if (!state.logReady) return loadingBlock();
+  const error = state.logError ? `<div class="card stack gap-8" role="alert"><p class="small">${t("log.load_failed")}</p><p class="tiny">${esc(state.logError)}</p><button class="btn ghost" data-act="retry-log">${t("common.retry")}</button></div>` : "";
+  if (!state.logReady) return error || loadingBlock();
   if (!list.length) {
-    return `<div class="empty stack gap-8">
+    return error + `<div class="empty stack gap-8">
       <h2 class="display sm">${t("log.empty_title")}</h2>
       <p class="small">${t("log.empty_body")}</p>
     </div>`;
@@ -732,7 +772,7 @@ function entryListHtml(list) {
     html += entryRow(entry);
   }
   html += `</div><div class="row-between" style="margin-top:16px"><button class="btn ghost" data-act="previous" ${state.logPage === 0 ? "disabled" : ""}>${t("log.previous")}</button><span class="tiny">${t("log.page", { n: state.logPage + 1 })}</span><button class="btn ghost" data-act="more" ${state.logCursor ? "" : "disabled"}>${t("log.next")}</button></div>`;
-  return html;
+  return error + html;
 }
 
 function viewLog() {
@@ -750,7 +790,7 @@ function viewLog() {
   return `<div class="stack gap-16">
     <div class="row-between">
       <h1 class="display sm">${t("log.title")}</h1>
-            <span class="tiny" id="log-count">${countLabel(list)}</span>
+            <span class="tiny" id="log-count">${countLabel()}</span>
     </div>
 
     <div class="chip-row" id="log-filters">${filterChips}</div>
@@ -776,7 +816,7 @@ function renderLogList() {
   }
   const list = filteredEntries();
   body.innerHTML = entryListHtml(list);
-    $("#log-count").textContent = countLabel(list);
+    $("#log-count").textContent = countLabel();
   $$("#log-filters .chip").forEach((chip) =>
     chip.classList.toggle("on", chip.dataset.emotion === state.filter.emotion)
   );
@@ -878,7 +918,7 @@ function basicBlock(stats) {
   </div>`;
 }
 
-function patternCard(p, sample = false, focus = false, reminder = "") {
+function patternCard(p, sample = false, focus = false, reminder = "", why = "") {
   const color = emotionMeta(p.dominant_emotion).color;
   const where = p.band
     ? getLang() === "zh"
@@ -896,6 +936,7 @@ function patternCard(p, sample = false, focus = false, reminder = "") {
       </span>
     </div>
     <p class="pattern-quote">${esc(p.text || "")}</p>
+    ${focus && why ? `<p class="small">${esc(why)}</p>` : ""}
     ${reminder ? `<p class="small">${esc(reminder)}</p>` : ""}
     <div class="pattern-foot">
       <span class="tag moss">${esc(p.dominant_emotion_label)}</span>
@@ -1042,6 +1083,8 @@ function aiCard(ins) {
       <span class="tag moss">${t("ai.records", { n: sample.entries || 0 })}</span>
     </div>
     ${ai.headline ? `<p class="display sm" style="margin:0">${esc(ai.headline)}</p>` : ""}
+    ${ai.summary ? `<p class="body-lg" style="white-space:pre-line">${esc(ai.summary)}</p>` : ""}
+    ${(ai.reminders || []).length ? `<div class="stack gap-8"><h3 class="eyebrow">${t("ai.reminders")}</h3>${ai.reminders.map(reminderRow).join("")}</div>` : ""}
     ${
       ai.next_step
         ? `<div class="ai-next">
@@ -1063,7 +1106,7 @@ function proBlock(ins) {
   const showAi = !!ai.enabled && ai.status !== "pro";
   const focusKey = (ai.focus && ai.focus.key) || "";
   const body = patterns.length
-    ? `<div class="stack gap-12">${patterns.map((p, i) => patternCard(p, false, p.key === focusKey, (ins.reminders || [])[i] || "")).join("")}</div>`
+    ? `<div class="stack gap-12">${patterns.map((p, i) => patternCard(p, false, p.key === focusKey, (ins.reminders || [])[i] || "", ai.focus?.why || "")).join("")}</div>`
     : `<div class="card flat"><p class="small">${t("ins.no_pattern")}</p></div>`;
   const efficacy = ins.efficacy || [];
 
@@ -1218,7 +1261,24 @@ let pendingPop = 0; // 关浮层时我们自己发出去、等着被认领的 hi
 let lastFocused = null;
 let lockedScrollY = 0;
 
-function openOverlay(inner, { focus = true, label = "" } = {}) {
+let crisisReturn = null;
+let crisisSeq = 0;
+
+function restoreCrisis() {
+  if (!crisisReturn) return false;
+  const previous = crisisReturn;
+  crisisReturn = null;
+  ++crisisSeq;
+  overlay.replaceChildren(...previous.nodes);
+  overlay.setAttribute("aria-label", previous.label);
+  overlay.scrollTop = previous.scrollTop;
+  if (previous.focus && document.contains(previous.focus)) previous.focus.focus({ preventScroll: true });
+  else focusFirst();
+  return true;
+}
+
+function openOverlay(inner, { focus = true, label = "", allowGuest = false } = {}) {
+  if (sessionExpired && !allowGuest) return;
   const first = overlay.hidden;
   if (first) {
     lastFocused = document.activeElement;
@@ -1249,6 +1309,8 @@ function focusFirst() {
 }
 
 function destroyOverlay() {
+  crisisReturn = null;
+  ++crisisSeq;
   expression.detach();
   practice.dispose();
   iv.draft = null;
@@ -1269,6 +1331,7 @@ function destroyOverlay() {
 }
 
 function closeOverlay() {
+  if (restoreCrisis()) { pendingPop += 1; history.back(); return; }
   if (iv.saving || expression.busy) return;
   if (practice.active) { practice.leave(); return; }
   const popNeeded = overlayInHistory;
@@ -1553,11 +1616,13 @@ function setProgress(ratio) {
 /* 计时统一走 rAF + 真实时间戳。原来用 await sleep(1000) 累加，
 后台标签页的定时器被节流后 30 秒引导会拖成一分多钟，呼吸节律也跟着跑偏。 */
 function ticker(totalSeconds, token, onFrame) {
-  const start = performance.now();
+  let previous = performance.now(), elapsed = 0;
   const total = totalSeconds * 1000;
   function frame(now) {
     if (token !== iv.token) return;
-    const elapsed = Math.min(total, now - start);
+    if (!crisisReturn) elapsed = Math.min(total, elapsed + Math.max(0, now - previous));
+    previous = now;
+    if (crisisReturn) { requestAnimationFrame(frame); return; }
     onFrame(elapsed / 1000, elapsed >= total);
     if (elapsed >= total) {
       nextStep();
@@ -1739,7 +1804,7 @@ async function openEditSheet(entryId, fromIntervention = false) {
     <div class="row-between" style="margin-bottom:16px">
       <div class="stack" style="gap:2px">
         <span class="eyebrow" style="color:${meta.color}">${esc(meta.label)}</span>
-        <span class="tiny">${esc(entryTime(entry))} · UTC${entry.tz_offset >= 0 ? "+" : ""}${entry.tz_offset / 60}</span>
+        <span class="tiny">${esc(entryTime(entry))} · ${offsetLabel(entry.tz_offset)}</span>
       </div>
       <div class="row">${sheet.isDraft ? "" : `<button class="btn ghost sm delete-link" data-act="delete-entry" data-id="${entry.id}">${t("common.delete")}</button>`}${sheetClose()}</div>
     </div>
@@ -1845,20 +1910,28 @@ async function saveNote(startPractice = false) {
 /* --------------------------------------------------------------- 危机表 */
 
 async function openCrisis() {
+  if (iv.saving || expression.busy || crisisReturn) return;
+  if (!overlay.hidden && iv.draft) {
+    crisisReturn = { nodes: Array.from(overlay.childNodes), label: overlay.getAttribute("aria-label") || "", scrollTop: overlay.scrollTop, focus: document.activeElement };
+    history.pushState({ view: state.view, overlay: true, resources: true }, "", location.hash);
+  }
+  const ticket = ++crisisSeq;
   const region = (state.account && state.account.region) || (getLang() === "zh" ? "CN" : "US");
   openOverlay(`<div class="sheet center"><div class="stack gap-12">
     <div class="row-between"><h2 class="section-title">${t("crisis.title")}</h2>${sheetClose()}</div>
     <div class="skeleton" style="width:60%"></div>
     <div class="skeleton" style="height:70px;border-radius:16px"></div>
-  </div></div>`, { label: t("crisis.title") });
+  </div></div>`, { label: t("crisis.title"), allowGuest: true });
   let data;
   try {
     data = await api.crisis(region);
   } catch (err) {
+    if (ticket !== crisisSeq) return;
     toast(err.message);
     closeOverlay();
     return;
   }
+  if (ticket !== crisisSeq) return;
   openOverlay(
     `<div class="sheet center">
       <div class="row-between" style="margin-bottom:14px">
@@ -1876,7 +1949,7 @@ async function openCrisis() {
       <a class="btn ghost block" style="margin-top:12px" href="https://findahelpline.com" target="_blank" rel="noopener">${t("crisis.find")} →</a>
       <p class="tiny" style="margin-top:14px">${t("crisis.note")}</p>
     </div>`,
-    { focus: true, label: `${t("crisis.title")} · ${data.label}` }
+    { focus: true, label: `${t("crisis.title")} · ${data.label}`, allowGuest: true }
   );
 }
 
@@ -2077,6 +2150,7 @@ const expression = createExpressionController({
 });
 
 const ACTIONS = {
+  "retry-log": () => loadEntries({ cursor: state.logPages[state.logPage], page: state.logPage }),
   "entry-practice": async (node) => {
     const id = Number(node.dataset.id);
     closeOverlay();
@@ -2180,7 +2254,7 @@ const ACTIONS = {
       /* 无痕模式 */
     }
     applyTheme();
-    render();
+    renderTheme();
   },
   export: (node) => {
     window.location.href = api.exportUrl(node.dataset.format);
@@ -2288,6 +2362,9 @@ document.addEventListener("keydown", (event) => {
 
   // 引导过程里不想找按钮：空格 / 回车直接下一步
   if (event.key === " " || event.key === "Enter") {
+    // The focused next button also repeats its native Enter click unless cancelled.
+    if (event.repeat && !event.target.matches("textarea, input, select") &&
+        overlay.querySelector('[data-act="iv-next"]')) { event.preventDefault(); return; }
     if (event.target.matches("textarea, input, select, button, a")) return;
     const next = overlay.querySelector('[data-act="iv-next"]');
     if (next) {
@@ -2422,7 +2499,7 @@ async function spinWheel() {
   const rotor = overlay.querySelector(".wheel-rotor");
   if (rotor) rotor.style.transform = `rotate(${wheel.angle}deg)`;
 
-  await sleep(4200);
+  await sleep(window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 4200);
   wheel.spinning = false;
 
   const label = wheel.items[index].label;
@@ -2553,6 +2630,7 @@ function renderAuth(mode = "login") {
       <p class="small">${t("auth.slogan")}</p>
     </section>
     <form class="card auth-card stack gap-16" data-auth-form data-mode="${mode}">
+      ${sessionExpired && expression.isDirty() ? `<div class="stack gap-8" role="status"><p class="small">${t("auth.draft_download")}</p><button type="button" class="btn ghost" data-act="e-download">${t("express.download")}</button></div>` : ""}
       <div class="stack gap-6"><h2 class="section-title">${isLogin ? t("auth.welcome") : t("auth.register_title")}</h2><p class="small">${t("auth.lede")}</p></div>
       <label class="stack gap-6">
         <span class="field-label">${t("auth.username")}</span>
@@ -2605,7 +2683,10 @@ document.addEventListener("submit", async (event) => {
 
 /* 会话在别的设备被踢掉、或过期时，任何一次请求都可能带回 401 */
 window.addEventListener("tether:unauthorized", () => {
+  if (sessionExpired) return;
+  sessionExpired = true;
   api.cancelPending();
+  expression.suspend();
   practice.reset();
   ++homeSeq;
   ++accountSeq;
@@ -2615,9 +2696,12 @@ window.addEventListener("tether:unauthorized", () => {
   state.home = { items: [], watch: false, total: 0 };
   state.logReady = false;
   ++logSeq;
+  state.logError = "";
   invalidateInsights();
   iv.saving = false;
-  if (!overlay.hidden) closeOverlay();
+  if (confirmResolver) settleConfirm(false);
+  destroyOverlay();
+  history.replaceState({ view: state.view }, "", location.hash);
   renderAuth();
 });
 

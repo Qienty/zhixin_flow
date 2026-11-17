@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
+import re
 
 TAG_RULES = [
     {
@@ -113,7 +113,7 @@ TAG_RULES = [
         "zh": "环境 / 噪音",
         "en": "environment & noise",
         "keywords": [
-            "噪音", "吵", "装修", "拥挤", "天气", "noise", "loud", "crowded",
+            "噪音", "吵闹", "嘈杂", "太吵", "很吵", "装修", "拥挤", "天气", "noise", "loud", "crowded",
             "construction", "weather",
         ],
     },
@@ -253,7 +253,8 @@ def tag_cause(cause: str) -> list[str]:
     hits = []
     for rule in TAG_RULES:
         for kw in rule["keywords"]:
-            if kw in text:
+            matched = re.search(r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])", text) if kw.isascii() else kw in text
+            if matched:
                 hits.append(rule["key"])
                 break
     return hits
@@ -646,13 +647,3 @@ def build_insights(entries: list[dict], days: int, lang: str, locked: bool, toda
         "locked": locked,
         "generated_at": now.isoformat(timespec="seconds"),
     }
-
-
-def _parse(value: str) -> datetime:
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt

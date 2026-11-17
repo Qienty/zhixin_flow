@@ -192,6 +192,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM ai_cache WHERE user_id IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_user ON ai_cache(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_created ON ai_cache(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_expiry ON ai_cache(julianday(created_at))")
     for event, owners in (("INSERT", "NEW.user_id"), ("UPDATE", "OLD.user_id, NEW.user_id"), ("DELETE", "OLD.user_id")):
         conn.execute(f"""CREATE TRIGGER IF NOT EXISTS entries_invalidate_ai_{event.lower()}
             AFTER {event} ON entries BEGIN
