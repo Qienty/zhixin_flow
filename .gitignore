@@ -23,3 +23,6 @@ backend/data/*.db-journal
 Thumbs.db
 .idea/
 .vscode/
+
+# 本地临时产物（截图、PDF 渲染、演示库等，勿入库）
+/tmp/

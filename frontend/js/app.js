@@ -3,6 +3,7 @@
 import { api, setApiLang, tzOffset } from "./api.js";
 import { t, setLang, getLang, applyStaticText } from "./i18n.js";
 import { createPracticeController } from "./practices.js";
+import { createExpressionController } from "./expression.js";
 
 /* ------------------------------------------------------------- 常量与状态 */
 
@@ -523,7 +524,7 @@ window.addEventListener("popstate", (event) => {
     pendingPop -= 1;
     return;
   }
-  if (overlayInHistory && iv.saving) {
+  if (overlayInHistory && (iv.saving || expression.busy)) {
     history.pushState({ view: state.view, overlay: true }, '', location.hash);
     return;
   }
@@ -537,7 +538,7 @@ window.addEventListener("popstate", (event) => {
     destroyOverlay();
     // 浮层里的改动已经同步进 state.entries，这里只补一下账号里的记录数
     render();
-    loadAccount().catch(() => {});
+    if (state.account) loadAccount().catch(() => {});
     return;
   }
   const view = st.view || hashView();
@@ -654,6 +655,8 @@ function viewNow() {
       </div>
       <img class="hero-landscape" src="./assets/landscape.svg" alt="" aria-hidden="true" width="840" height="600" />
     </section>
+
+    ${expression.card()}
 
     <section class="emotion-section stack gap-12">
       <div class="row-between">
@@ -1246,6 +1249,7 @@ function focusFirst() {
 }
 
 function destroyOverlay() {
+  expression.detach();
   practice.dispose();
   iv.draft = null;
   iv.token += 1;
@@ -1265,7 +1269,7 @@ function destroyOverlay() {
 }
 
 function closeOverlay() {
-  if (iv.saving) return;
+  if (iv.saving || expression.busy) return;
   if (practice.active) { practice.leave(); return; }
   const popNeeded = overlayInHistory;
   destroyOverlay();
@@ -1372,7 +1376,7 @@ async function pickEmotion(emotionKey, node) {
     iv.step = -1; // -1 = 先说那一句话，再进步骤
     iv.relief = null;
     iv.crisis = null;
-    renderStep();
+    renderGuideChoice();
     picking = false; // 浮层已经盖住瓦片，危机资源可以慢慢补
     if (intervention.branch === "despair") {
       // 危机资源异步补进来，但脚本第一步不等它
@@ -1390,6 +1394,19 @@ async function pickEmotion(emotionKey, node) {
     picking = false;
     if (node) node.classList.remove("pending");
   }
+}
+
+function renderGuideChoice() {
+  const meta = emotionMeta(iv.draft.emotion);
+  openOverlay(`<div class="sheet center stack gap-20">
+    <div class="row-between"><span class="eyebrow">${esc(meta.label)}</span>${sheetClose()}</div>
+    <h2 class="section-title">${t("express.guide_title")}</h2>
+    <p class="small">${t("express.guide_note")}</p>
+    <button class="btn block" data-act="record-direct">${t("express.record_only")}</button>
+    ${iv.data.branch !== "none" ? `<button class="btn soft block" data-act="guide-start">${t("express.guide_start")}</button>` : ""}
+    ${iv.data.branch === "despair" ? `<button class="btn ghost block" data-act="open-crisis">${t("crisis.title")}</button>` : ""}
+    <button class="btn ghost block" data-act="close">${t("express.leave_without_saving")}</button>
+  </div>`, { label: t("express.guide_title") });
 }
 
 async function nextStep() {
@@ -1766,7 +1783,11 @@ async function openEditSheet(entryId, fromIntervention = false) {
       </div>
     </div>
 
+    ${entry.note ? `<label class="stack gap-8" style="margin-top:18px"><span class="field-label">${t("express.saved_notes")}</span>
+      <textarea data-input="note" maxlength="1000">${esc(entry.note)}</textarea><span class="tiny">${t("express.notes_limit")}</span></label>` : ""}
+
     <div class="stack gap-8" style="margin-top:22px">
+      <p class="tiny">${t("express.server_note")}</p>
       <button class="btn block" data-act="save-note">${t("note.save")}</button>
       ${!sheet.isDraft && !sheet.queue ? `<button class="btn soft block" data-act="save-note-practice">${t("practice.save_and_start")}</button>` : ''}
       ${sheet.queue ? `<p class="tiny">${t("log.queue_hint")}</p>` : ""}
@@ -1794,6 +1815,8 @@ async function saveNote(startPractice = false) {
   if (sheet.isDraft && !cause && !sheet.severity) { toast(t("note.draft_required")); return; }
   if (sheet.queue && (!cause || !sheet.severity)) { toast(t("log.complete_required")); return; }
   const payload = { cause };
+  const noteInput = overlay.querySelector('[data-input="note"]');
+  if (noteInput) payload.note = noteInput.value.trim();
   if (sheet.severity) payload.severity = sheet.severity;
   if (button) button.classList.add("busy");
   if (sheet.isDraft) iv.saving = true;
@@ -2023,7 +2046,7 @@ async function removeEntry(id) {
 /* 关浮层：干预里写过的 relief / 强度都已经同步进 state.entries 了，
 所以这里只重绘 + 补一下账号里的记录数，不再整表重拉一遍。 */
 function closeAndSync() {
-  if (iv.saving) return;
+  if (iv.saving || expression.busy) return;
   if (practice.active) { practice.leave(); return; }
   sheet.queue = false;
   closeOverlay();
@@ -2036,6 +2059,21 @@ function closeAndSync() {
 const practice = createPracticeController({
   api, t, esc, getLang, tzOffset, overlay, render, open: openOverlay,
   close: () => { closeOverlay(); render(); }, confirm: askConfirm, toast, support: openCrisis,
+});
+
+const expression = createExpressionController({
+  api, t, esc, tzOffset, overlay, open: openOverlay, close: closeOverlay, confirm: askConfirm, toast, render,
+  getAccount: () => state.account, getEmotions: () => state.meta?.emotions || [], changed: entriesChanged,
+  download: (text) => {
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tether-expression-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
 });
 
 const ACTIONS = {
@@ -2063,6 +2101,7 @@ const ACTIONS = {
   relief: (node) => setRelief(node.dataset.relief),
   note: () => openEditSheet(iv.entryId, true),
   "record-direct": () => openEditSheet(null, true),
+  "guide-start": () => renderStep(),
   close: () => closeAndSync(),
   "edit-entry": (node) => { sheet.queue = false; return openEditSheet(Number(node.dataset.id), false); },
   sev: (node) => {
@@ -2159,6 +2198,10 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const action = ACTIONS[node.dataset.act];
+  if (node.dataset.act.startsWith("e-")) {
+    try { await expression.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
+    return;
+  }
   if (node.dataset.act.startsWith("p-")) {
     try { await practice.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
     return;
@@ -2169,6 +2212,7 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  expression.input(event.target);
   practice.input(event.target);
   if (event.target.name === 'new_password') {
     const value = event.target.value;
@@ -2179,6 +2223,7 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", async (event) => {
+  expression.change(event.target);
   if (event.target.id === "import-file") { await importFile(event.target.files[0]); event.target.value = ""; return; }
   const node = event.target.closest("[data-act='region']");
   if (!node) return;
@@ -2490,7 +2535,7 @@ function wheelCard() {
 
 /* --------------------------------------------------------------- 登录门 */
 
-/* 没登录就只给这一屏：不渲染 tab、不拉记录。
+/* 未登录可先在内存中表达，不拉取或上传账号记录。
    登录成功后整页重载一次，让所有状态从干净的地方开始。 */
 function renderAuth(mode = "login") {
   const isLogin = mode === "login";
@@ -2507,6 +2552,7 @@ function renderAuth(mode = "login") {
       <h1 class="display">${t("auth.headline")}</h1>
       <p class="small">${t("auth.slogan")}</p>
     </section>
+    ${expression.card()}
     <form class="card auth-card stack gap-16" data-auth-form data-mode="${mode}">
       <div class="stack gap-6"><h2 class="section-title">${isLogin ? t("auth.welcome") : t("auth.register_title")}</h2><p class="small">${t("auth.lede")}</p></div>
       <label class="stack gap-6">
@@ -2530,8 +2576,7 @@ function renderAuth(mode = "login") {
     </div>
     <p class="page-footnote tiny">${t("auth.footer")}</p>
   </div>`;
-  const first = view.querySelector("[data-autofocus]");
-  if (first && window.matchMedia("(hover: hover) and (pointer: fine)").matches) first.focus({ preventScroll: true });
+  // Keep the free-expression entry in view instead of scrolling to the login form.
 }
 
 document.addEventListener("submit", async (event) => {
@@ -2541,12 +2586,15 @@ document.addEventListener("submit", async (event) => {
   const mode = form.dataset.mode;
   const username = form.querySelector('[name="username"]').value.trim();
   const password = form.querySelector('[name="password"]').value;
+  if (expression.isDirty() && !await askConfirm({ title: t("express.login_confirm"),
+    body: t("express.login_note"), ok: t("auth.login") })) return;
   const button = form.querySelector("button[type=submit]");
   button.disabled = true;
   button.textContent = t("auth.logging_in");
   try {
     if (mode === "login") await api.login(username, password);
     else await api.register(username, password);
+    expression.reset();
     location.reload();
   } catch (err) {
     toast(err.message);
@@ -2582,6 +2630,7 @@ async function doLogout() {
     await api.logout();
     api.cancelPending();
     practice.reset();
+    expression.reset();
     location.reload();
   } catch {
     toast(t("auth.logout_failed"));
@@ -2733,7 +2782,7 @@ window.addEventListener("online", () => {
   if (!document.hidden && state.account) ensureViewData(state.view, { force: true, silent: true });
 });
 window.addEventListener("beforeunload", (event) => {
-  if (practice.isDirty()) { event.preventDefault(); event.returnValue = ''; }
+  if (practice.isDirty() || expression.isDirty()) { event.preventDefault(); event.returnValue = ''; }
 });
 setInterval(() => {
   if (!document.hidden && state.account) ensureViewData(state.view, { silent: true });

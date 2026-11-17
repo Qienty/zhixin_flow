@@ -4,6 +4,27 @@
    深色是「夜里的纸」：暖炭底 + 提亮的墨绿，不是纯黑 + 霓虹。
    ========================================================================== */
 
+/* Expression uses the existing paper/moss palette in both themes. */
+.expression-card { border: 1px solid var(--line-strong); }
+.gap-20 { gap: 20px; }
+.expression-card textarea, .expression-sheet textarea { width: 100%; min-height: 112px; resize: vertical; line-height: 1.7; }
+.expression-card textarea { min-height: 96px; }
+.expression-privacy { padding: 10px 12px; border-radius: 12px; background: var(--moss-tint); color: var(--ink-2); line-height: 1.7; }
+.expression-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.expression-mode { min-height: 48px; padding: 10px 8px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); color: var(--ink-2); font-size: 13px; line-height: 1.45; cursor: pointer; }
+.expression-mode.on { background: var(--moss-tint); border-color: var(--moss); color: var(--ink); font-weight: 600; }
+.expression-mode:focus-visible, .expression-save summary:focus-visible { outline: 2px solid var(--moss); outline-offset: 3px; }
+.expression-prompts { border-left: 2px solid var(--line-strong); padding-left: 14px; }
+.expression-save { padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-soft); }
+.expression-save summary { cursor: pointer; line-height: 1.6; }
+.expression-save[open] summary { margin-bottom: 16px; }
+.expression-save select { width: 100%; }
+.expression-error { color: var(--brick); }
+.expression-sheet textarea[readonly] { opacity: .8; }
+.expression-sheet .icon-btn { flex-shrink: 0; font-size: 26px; }
+.expression-sheet { overflow-wrap: anywhere; }
+.expression-card .btn { justify-content: space-between; }
+
 :root {
   color-scheme: light;
 

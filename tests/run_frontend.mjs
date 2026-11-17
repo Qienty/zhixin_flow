@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import vm from "node:vm";
+import { webcrypto } from "node:crypto";
 
 const root = new URL("../", import.meta.url);
 const read = (file) => fs.readFile(new URL(file, root), "utf8");
@@ -9,6 +10,7 @@ const appSource = await read("frontend/js/app.js");
 const clientSource = await read("frontend/js/api.js");
 const i18nSource = await read("frontend/js/i18n.js");
 const practiceSource = await read("frontend/js/practices.js");
+const expressionSource = await read("frontend/js/expression.js");
 const plain = (source) => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -67,16 +69,16 @@ function app(overrides = {}) {
     querySelector: node, querySelectorAll: () => [], contains: () => false,
     addEventListener: (name, fn) => events.set(name, fn) };
   const context = vm.createContext({
-    api, document, window, Date, Intl, AbortController, URL, URLSearchParams,
+    api, document, window, Date, Intl, AbortController, URL, URLSearchParams, crypto: webcrypto,
     location: { hash: "#now", reload: () => calls.push("reload") },
     history: { pushState() {}, back() {}, replaceState() {} },
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, clearInterval() {}, requestAnimationFrame: () => 1,
     t: (key) => key, getLang: () => "zh", tzOffset: () => 480, messages,
   });
-  vm.runInContext(plain(practiceSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
+  vm.runInContext(plain(expressionSource) + '\n' + plain(practiceSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
     render = () => {}; renderAuth = () => {}; renderLogList = () => {};
     toast = (message) => messages.push(message);
-    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay };
+    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay, expression };
   `, context);
   Object.assign(context.hooks.state, { account: { user: { id: 1 } }, home: { local_today: today }, logReady: true, insights: { old: true } });
   context.hooks.overlay.hidden = true;
@@ -84,7 +86,7 @@ function app(overrides = {}) {
 }
 
 test("JavaScript syntax and Chinese/English key parity", async () => {
-  for (const file of ["app", "api", "i18n", "practices", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
+  for (const file of ["app", "api", "i18n", "practices", "expression", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
   const context = vm.createContext({});
   vm.runInContext(plain(i18nSource) + "\nglobalThis.tables = dict;", context);
   assert.deepEqual(Object.keys(context.tables.zh).sort(), Object.keys(context.tables.en).sort());
@@ -268,6 +270,147 @@ test("An old insights read cannot overwrite a newer AI analysis", async () => {
   old.resolve({ ai: { status: "pending" } });
   await reading;
   assert.equal(a.hooks.state.insights.ai.summary, "new");
+});
+
+function expressionFixture({ account = { user: { id: 1 } }, confirm = true, create, changed, language = "zh" } = {}) {
+  const calls = [], downloads = [], messages = [];
+  const display = { html: "", closed: false };
+  const context = vm.createContext({ crypto: webcrypto, Date, document: { documentElement: {}, querySelector: () => null } });
+  vm.runInContext(plain(i18nSource) + '\n' + plain(expressionSource) + '\nglobalThis.make = createExpressionController;', context);
+  context.setLang(language);
+  const controller = context.make({
+    api: { createEntry: async payload => { calls.push(payload); return create ? create(payload) : { entry: { id: 1 } }; } },
+    t: context.t, esc: text => String(text).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('\"', '&quot;'),
+    getAccount: () => account, getEmotions: () => [{ key: "anxiety", label: "焦虑" }], tzOffset: () => 480,
+    overlay: { querySelector: () => null }, open: html => { display.html = html; }, close: () => { display.closed = true; },
+    confirm: async () => confirm, toast: message => messages.push(message), render() {},
+    changed: changed || (async () => {}), download: text => downloads.push(text),
+  });
+  const input = (key, value) => controller.input({ dataset: { expressionField: key }, value, closest: () => null });
+  const emotion = value => controller.change({ matches: () => true, value });
+  return { controller, calls, downloads, messages, display, input, emotion };
+}
+
+test("Guest expression, mode changes and downloads never upload content", async () => {
+  const f = expressionFixture({ account: null });
+  f.input("text", "今天的作业让我很烦 <script>alert(1)</script>");
+  await f.controller.handle("open");
+  assert.ok(f.display.html.includes('&lt;script&gt;'));
+  assert.ok(!f.display.html.includes('<script>'));
+  assert.ok(!f.display.html.includes('data-act="e-save"'));
+  await f.controller.handle("mode", { dataset: { mode: "clarify" } });
+  f.input("need", "想先把话说完");
+  await f.controller.handle("mode", { dataset: { mode: "space" } });
+  assert.ok(!f.display.html.includes('data-expression-field="need"'));
+  await f.controller.handle("mode", { dataset: { mode: "clarify" } });
+  assert.ok(f.display.html.includes('想先把话说完'));
+  await f.controller.handle("download");
+  await f.controller.handle("save");
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.downloads.length, 1);
+  assert.ok(f.downloads[0].includes('想先把话说完'));
+  assert.equal(f.controller.isDirty(), true);
+});
+
+test("Account saving requires content, an explicit feeling, and confirmation", async () => {
+  const f = expressionFixture();
+  await f.controller.handle("save");
+  f.input("text", "  想慢慢说  ");
+  await f.controller.handle("save");
+  f.emotion("invented");
+  await f.controller.handle("save");
+  assert.equal(f.calls.length, 0);
+  f.emotion("anxiety");
+  await f.controller.handle("save");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].cause, "想慢慢说");
+  assert.equal(f.calls[0].intervention_completed, false);
+  assert.equal(f.controller.isDirty(), false);
+  assert.equal(f.display.closed, true);
+  const cancelled = expressionFixture({ confirm: false });
+  cancelled.input("text", "留在这里"); cancelled.emotion("anxiety");
+  await cancelled.controller.handle("save");
+  assert.equal(cancelled.calls.length, 0);
+  assert.equal(cancelled.controller.isDirty(), true);
+  assert.equal(cancelled.controller.busy, false);
+});
+
+test("Optional main text can be skipped when saving reflection answers", async () => {
+  const f = expressionFixture();
+  f.input("need", "希望有人先听我说完"); f.emotion("anxiety");
+  await f.controller.handle("save");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].cause, "");
+  assert.ok(f.calls[0].note.includes("希望有人先听我说完"));
+  assert.equal(f.controller.isDirty(), false);
+});
+
+test("Unconfirmed expression saves freeze their payload and retry idempotently", async () => {
+  let first = true;
+  const f = expressionFixture({ create: async () => { if (first) { first = false; throw new Error('lost response'); } return { entry: { id: 1 } }; } });
+  f.input("text", "原稿"); f.input("need", "不要替我决定"); f.emotion("anxiety");
+  await f.controller.handle("open");
+  await f.controller.handle("save");
+  assert.equal(f.controller.isDirty(), true);
+  assert.equal(f.controller.busy, false);
+  assert.ok(f.display.html.includes('readonly'));
+  f.input("text", "不能覆盖待确认的请求");
+  await f.controller.handle("mode", { dataset: { mode: "next" } });
+  await f.controller.handle("save");
+  assert.deepEqual(f.calls[0], f.calls[1]);
+  assert.equal(f.calls[1].cause, "原稿");
+  assert.ok(f.calls[1].note.includes('不要替我决定'));
+  assert.equal(f.controller.isDirty(), false);
+});
+
+test("Expression double-save is guarded; a refresh error does not undo saving", async () => {
+  const wait = deferred();
+  const f = expressionFixture({ create: () => wait.promise, changed: async () => { throw new Error('offline'); } });
+  f.input("text", "一次就好"); f.emotion("anxiety");
+  const first = f.controller.handle("save");
+  await f.controller.handle("save");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.controller.busy, true);
+  wait.resolve({ entry: { id: 1 } });
+  await first;
+  assert.equal(f.controller.isDirty(), false);
+  assert.ok(f.messages.some(message => message.includes('内容已保存，列表刷新失败')));
+});
+
+test("Closing keeps the in-memory draft; explicit clearing removes all answers", async () => {
+  const f = expressionFixture();
+  f.input("text", "本页文字"); f.input("support", "陪我聊一会");
+  f.controller.detach();
+  assert.equal(f.controller.isDirty(), true);
+  assert.ok(f.controller.card().includes('本页文字'));
+  await f.controller.handle("clear");
+  assert.equal(f.controller.isDirty(), false);
+  assert.equal(f.calls.length, 0);
+  const cancelled = expressionFixture({ confirm: false });
+  cancelled.input("text", "还想留着");
+  await cancelled.controller.handle("clear");
+  assert.equal(cancelled.controller.isDirty(), true);
+});
+
+test("Reflection answers stay within the API limits in both languages", async () => {
+  for (const language of ["zh", "en"]) {
+    const f = expressionFixture({ language });
+    f.input("text", "字".repeat(700));
+    for (const key of ["facts", "need", "step", "support"]) f.input(key, "字".repeat(200));
+    f.emotion("anxiety");
+    await f.controller.handle("save");
+    assert.equal(f.calls[0].cause.length, 500);
+    assert.ok(f.calls[0].note.length <= 1000);
+  }
+});
+
+test("Picking a feeling offers a choice without starting a guide or saving", async () => {
+  const a = app({ intervention: async () => ({ branch: "anxiety", steps: [] }), createEntry: async () => { throw new Error('must not save'); } });
+  await a.context.pickEmotion("anxiety");
+  assert.ok(a.hooks.overlay.innerHTML.includes('data-act="record-direct"'));
+  assert.ok(a.hooks.overlay.innerHTML.includes('data-act="guide-start"'));
+  assert.ok(!a.hooks.overlay.innerHTML.includes('data-act="iv-next"'));
+  assert.equal(a.hooks.iv.draft.emotion, "anxiety");
 });
 
 let failures = 0;
