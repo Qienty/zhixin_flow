@@ -2135,7 +2135,7 @@ const practice = createPracticeController({
 });
 
 const expression = createExpressionController({
-  api, t, esc, tzOffset, overlay, open: openOverlay, close: closeOverlay, confirm: askConfirm, toast, render,
+  api, t, esc, getLang, tzOffset, overlay, open: openOverlay, close: closeOverlay, confirm: askConfirm, toast, render,
   getAccount: () => state.account, getEmotions: () => state.meta?.emotions || [], changed: entriesChanged,
   download: (text) => {
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));

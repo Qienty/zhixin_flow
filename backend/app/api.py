@@ -561,6 +561,43 @@ def record_intervention(req: Request):
     return _one(entry_id, uid)
 
 
+@router.route("POST", "/api/expression/translate")
+def translate_expression(req: Request):
+    """Explicitly convert a user's draft for a cross-language conversation.
+
+    This endpoint is separate from saving entries: a draft is never sent to the
+    model unless the user presses the translation action, and the converted text
+    is returned to the browser without being persisted.
+    """
+    body = req.json()
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ApiError(400, "text is required")
+    text = text.strip()
+    if len(text) > 500:
+        raise ApiError(422, "text is too long")
+    target_lang = body.get("target_lang")
+    if target_lang not in ("zh", "en"):
+        raise ApiError(400, "target_lang must be zh or en")
+    mode = body.get("mode") or "space"
+    if mode not in ("space", "clarify", "next"):
+        raise ApiError(400, "invalid expression mode")
+    emotion = body.get("emotion") or ""
+    if not isinstance(emotion, str):
+        emotion = ""
+    cfg = ai.config()
+    if not cfg["enabled"]:
+        message = "尚未配置 AI 服务" if req.lang == "zh" else "AI service is not configured"
+        raise ApiError(503, message)
+    with limits.analysis_slot(req.user["id"]):
+        try:
+            result = ai.rewrite_expression(text, target_lang, emotion=emotion, mode=mode)
+        except ai.AIError as exc:
+            message = _redact(str(exc))[:200] or ("AI 暂时不可用" if req.lang == "zh" else "AI is temporarily unavailable")
+            raise ApiError(502, message) from exc
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # 自助练习（独立会话，不写入 AI 分析材料）
 # --------------------------------------------------------------------------- #

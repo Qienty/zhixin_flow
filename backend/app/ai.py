@@ -154,6 +154,22 @@ facts 里没有 trend / peak / efficacy 时，对应字段给空字符串或空�
 focus.why 只讲理由，不要重复「先看这条」「最值得关注」这类标签——界面上已经有这个标签了。"""
 
 
+# 这是跨境表达的窄场景能力：把用户自己的话转换成另一种语言时，
+# 保留语气、边界和不确定性，不替用户补充事实，也不自动替用户发送。
+EXPRESSION_SYSTEM_PROMPT = """你是智心元流的跨语言表达编辑器。你的任务是把用户写下的日常感受改写成另一种语言，帮助跨文化生活中的用户向当地朋友、老师或支持人员表达自己。
+
+规则：
+- 只处理表达，不做诊断、治疗建议或危机判断；不要添加用户没有说过的事实。
+- 保留第一人称、情绪强度、不确定性和边界。用户说“我不确定”，不能改成确定结论。
+- 目标语言要自然、简洁、尊重当地日常表达；不要逐字翻译成生硬的句子，也不要使用俚语、过度亲密称呼或文化假设。
+- 根据 mode 保留沟通意图：space=只想表达，clarify=希望对方理解，next=想讨论下一步。
+- 如果原文包含请求被倾听、需要空间或希望得到建议的边界，要明确保留。
+- 输出只能是 JSON，不要代码块，不要解释：
+{"text":"改写后的正文","intent":"share|ask_listening|ask_space|ask_advice|unclear","cultural_notes":["最多两条简短说明"],"safety":"ok"}
+- cultural_notes 只在确实有帮助时填写，例如语气变得更直接或保留了“暂时不想要建议”的边界；没有说明时返回空数组。
+"""
+
+
 # --------------------------------------------------------------------------- #
 # 事实包
 # --------------------------------------------------------------------------- #
@@ -444,6 +460,61 @@ def analyze(entries: list[dict], days: int, lang: str, rules: dict) -> dict:
     ]
     narrative = _parse_json(_chat(cfg, messages))
     return _validate(narrative, rules)
+
+
+EXPRESSION_INTENTS = {"share", "ask_listening", "ask_space", "ask_advice", "unclear"}
+
+
+def _validate_expression(result: dict, target_lang: str) -> dict:
+    """Validate the small structured response used by the cross-language editor."""
+    if not isinstance(result, dict):
+        raise AIError("模型输出不是对象")
+    text = str(result.get("text") or "").strip()
+    if not text:
+        raise AIError("模型没有给出改写内容")
+    if len(text) > 1200:
+        raise AIError("模型改写内容过长")
+    term = safety_violation({"text": text, "cultural_notes": result.get("cultural_notes") or []})
+    if term:
+        raise AIError(f"模型输出含临床表述「{term}」，已拒绝显示")
+    intent = str(result.get("intent") or "unclear").strip()
+    if intent not in EXPRESSION_INTENTS:
+        intent = "unclear"
+    notes = []
+    for note in result.get("cultural_notes") or []:
+        value = str(note).strip()
+        if value:
+            notes.append(value[:160])
+    return {
+        "text": text,
+        "target_lang": "en" if target_lang == "en" else "zh",
+        "intent": intent,
+        "cultural_notes": notes[:2],
+        "safety": "ok",
+    }
+
+
+def rewrite_expression(text: str, target_lang: str, emotion: str = "", mode: str = "space") -> dict:
+    """Convert a user's own words for a cross-language conversation.
+
+    The caller must have obtained explicit user intent before invoking this function.
+    The source text is sent only for this request and is not persisted by this module.
+    """
+    cfg = config()
+    if not cfg["enabled"]:
+        raise AIError("未配置 AI 服务：请先配置 TETHER_AI_API_KEY")
+    language = "English" if target_lang == "en" else "简体中文"
+    payload = {
+        "source_text": text[:500],
+        "target_language": language,
+        "emotion": emotion[:40],
+        "mode": mode if mode in ("space", "clarify", "next") else "space",
+    }
+    messages = [
+        {"role": "system", "content": EXPRESSION_SYSTEM_PROMPT},
+        {"role": "user", "content": "请处理以下 JSON，不要添加事实：\n" + json.dumps(payload, ensure_ascii=False)},
+    ]
+    return _validate_expression(_parse_json(_chat(cfg, messages)), target_lang)
 
 
 # --------------------------------------------------------------------------- #

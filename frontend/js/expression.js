@@ -1,5 +1,6 @@
 /* Free expression stays in memory until an explicit download or account save.
-   This module uses local prompts; it never calls a model or sends messages. */
+   Cross-language conversion is also explicit: it only sends the draft after the
+   user presses the conversion button, and the result remains a local draft. */
 const EXPRESSION_MODES = ["space", "clarify", "next"];
 const EXPRESSION_FIELDS = { text: 500, facts: 160, need: 160, step: 160, support: 160 };
 
@@ -12,7 +13,7 @@ export function expressionNote(draft, t) {
 }
 
 export function createExpressionController({
-  api, t, esc, getAccount, getEmotions, tzOffset, overlay, open, close,
+  api, t, esc, getAccount, getEmotions, getLang = () => "zh", tzOffset, overlay, open, close,
   confirm, toast, render, changed, download,
 }) {
   const empty = () => ({ text: "", mode: "space", emotion: "", facts: "", need: "", step: "", support: "" });
@@ -21,8 +22,13 @@ export function createExpressionController({
   let busy = false;
   let pending = null;
   let error = "";
+  let translation = { target: "en", text: "", intent: "", notes: [], busy: false, error: "" };
   let epoch = 0;
   const dirty = () => Object.keys(EXPRESSION_FIELDS).some(key => draft[key].trim());
+  const defaultTarget = () => getLang() === "zh" ? "en" : "zh";
+  const resetTranslation = () => {
+    translation = { target: defaultTarget(), text: "", intent: "", notes: [], busy: false, error: "" };
+  };
   const field = (key, id) => `<label class="stack gap-8" for="${id}">
     <span class="field-label">${t("express." + (key === "text" ? "label" : key))}</span>
     <textarea id="${id}" data-expression-field="${key}" maxlength="${EXPRESSION_FIELDS[key]}" ${id === "expression-dialog-text" ? "data-autofocus" : ""} ${pending ? "readonly" : ""}
@@ -33,6 +39,31 @@ export function createExpressionController({
     ${EXPRESSION_MODES.map(mode => `<button class="expression-mode ${draft.mode === mode ? "on" : ""}" data-act="e-mode" data-mode="${mode}"
       aria-pressed="${draft.mode === mode}" ${pending ? "disabled" : ""}>${t("express.mode_" + mode)}</button>`).join("")}
   </div>`;
+
+  function translationPanel() {
+    if (!getAccount()) return "";
+    const result = translation.text ? `<label class="stack gap-8" for="expression-translation-result">
+      <span class="field-label">${t("express.translation_result")}</span>
+      <textarea id="expression-translation-result" class="expression-translation-result" readonly aria-describedby="expression-translation-note">${esc(translation.text)}</textarea>
+      <span id="expression-translation-note" class="tiny">${t("express.translation_result_note")}</span>
+      ${translation.notes.length ? `<ul class="tiny expression-translation-notes">${translation.notes.map(note => `<li>${esc(note)}</li>`).join("")}</ul>` : ""}
+      <button class="btn soft block" data-act="e-use-translation" ${translation.busy || pending ? "disabled" : ""}>${t("express.translation_use")}</button>
+    </label>` : "";
+    return `<div class="expression-cross-border stack gap-10">
+      <div class="row-between"><h3 class="field-label">${t("express.translation_title")}</h3><span class="tiny">${t("express.translation_badge")}</span></div>
+      <p class="tiny">${t("express.translation_note")}</p>
+      <div class="row gap-8">
+        <label class="sr-only" for="expression-translation-target">${t("express.translation_target")}</label>
+        <select id="expression-translation-target" data-expression-target ${pending || translation.busy ? "disabled" : ""}>
+          <option value="en" ${translation.target === "en" ? "selected" : ""}>${t("express.translation_english")}</option>
+          <option value="zh" ${translation.target === "zh" ? "selected" : ""}>${t("express.translation_chinese")}</option>
+        </select>
+        <button class="btn soft" data-act="e-translate" ${pending || translation.busy ? "disabled" : ""}>${t(translation.busy ? "express.translation_working" : "express.translation_action")}</button>
+      </div>
+      ${translation.error ? `<p class="expression-error small" role="alert">${esc(translation.error)}</p>` : ""}
+      ${result}
+    </div>`;
+  }
 
   function card() {
     return `<section class="card expression-card stack gap-16" aria-labelledby="expression-home-title">
@@ -56,6 +87,7 @@ export function createExpressionController({
         <p class="small">${t("express.hint_" + draft.mode)}</p>
         ${prompts.length ? `<p class="tiny">${t("express.local_prompts")}</p>${prompts.map(key => field(key, "expression-" + key)).join("")}` : ""}
       </div>
+      ${translationPanel()}
       <details class="expression-save stack gap-12" ${pending || error ? "open" : ""}>
         <summary class="field-label">${t("express.keep")}</summary>
         <div class="stack gap-12">
@@ -98,6 +130,49 @@ export function createExpressionController({
     if (node.matches("[data-expression-emotion]") && !pending) {
       draft.emotion = getEmotions().some(e => e.key === node.value) ? node.value : "";
     }
+    if (node.matches("[data-expression-target]") && !pending && !translation.busy) {
+      translation.target = node.value === "zh" ? "zh" : "en";
+      translation.text = "";
+      translation.notes = [];
+      translation.error = "";
+      paint();
+    }
+  }
+
+  async function translate() {
+    if (translation.busy || pending) return;
+    if (!getAccount()) { toast(t("express.guest")); return; }
+    if (!draft.text.trim()) { toast(t("express.text_required")); return; }
+    translation.busy = true;
+    translation.error = "";
+    const owner = epoch;
+    paint();
+    try {
+      const result = await api.translateExpression({
+        text: draft.text.trim(), target_lang: translation.target,
+        emotion: draft.emotion, mode: draft.mode,
+      });
+      if (owner !== epoch) return;
+      translation.text = result.text || "";
+      translation.intent = result.intent || "";
+      translation.notes = Array.isArray(result.cultural_notes) ? result.cultural_notes : [];
+    } catch (err) {
+      if (owner !== epoch) return;
+      translation.error = err.message;
+    } finally {
+      if (owner === epoch) translation.busy = false;
+      if (owner === epoch && active) paint();
+    }
+  }
+
+  function useTranslation() {
+    if (!translation.text || pending) return;
+    draft.text = translation.text.slice(0, EXPRESSION_FIELDS.text);
+    translation.text = "";
+    translation.notes = [];
+    translation.error = "";
+    paint();
+    overlay.querySelector("#expression-dialog-text")?.focus();
   }
 
   async function save() {
@@ -152,6 +227,10 @@ export function createExpressionController({
       overlay.querySelector(`[data-act="e-mode"][data-mode="${draft.mode}"]`)?.focus();
     } else if (action === "save") {
       await save();
+    } else if (action === "translate") {
+      await translate();
+    } else if (action === "use-translation") {
+      useTranslation();
     } else if (action === "download") {
       if (!dirty()) { toast(t("express.text_required")); return; }
       download(draft.text + "\n\n" + expressionNote(draft, t));
@@ -166,8 +245,8 @@ export function createExpressionController({
     }
   }
 
-  function suspend() { ++epoch; active = false; busy = false; }
-  function reset() { suspend(); draft = empty(); pending = null; error = ""; }
+  function suspend() { ++epoch; active = false; busy = false; translation.busy = false; }
+  function reset() { suspend(); draft = empty(); pending = null; error = ""; resetTranslation(); }
   return { card, handle, input, change, isDirty: dirty, reset, suspend, detach: () => { active = false; },
     get active() { return active; }, get busy() { return busy; } };
 }

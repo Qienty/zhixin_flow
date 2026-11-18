@@ -103,6 +103,8 @@ export const api = {
   intervention: (emotion) => call(`/api/interventions/${emotion}`),
   recordIntervention: (id, payload) =>
     call(`/api/entries/${id}/intervention`, { method: "POST", body: payload }),
+  translateExpression: (payload, signal) =>
+    call("/api/expression/translate", { method: "POST", body: payload, signal, timeout: 120000 }),
 
   stats: () => call("/api/stats/basic"),
   insights: () => call("/api/insights"),

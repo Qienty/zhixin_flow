@@ -144,6 +144,46 @@ class Regressions(unittest.TestCase):
         self.assertEqual(response.status, 409)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM ai_cache"), 0)
 
+    def test_expression_translation_requires_login_and_validates_payload(self):
+        body = {"text": "I feel a little unsure.", "target_lang": "zh", "mode": "space"}
+        unauthenticated = api.Request("POST", "/api/expression/translate", {}, json.dumps(body).encode(), {})
+        self.assertEqual(api.dispatch(unauthenticated).status, 401)
+
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}):
+            invalid_target = self.request("POST", "/api/expression/translate", {**body, "target_lang": "fr"})
+            too_long = self.request("POST", "/api/expression/translate", {**body, "text": "x" * 501})
+            invalid_mode = self.request("POST", "/api/expression/translate", {**body, "mode": "diagnose"})
+        self.assertEqual(invalid_target.status, 400)
+        self.assertEqual(too_long.status, 422)
+        self.assertEqual(invalid_mode.status, 400)
+
+    def test_expression_translation_is_explicit_and_never_persisted(self):
+        body = {"text": "I feel a little unsure.", "target_lang": "zh", "mode": "clarify", "emotion": "anxiety"}
+        result = {"text": "我有点拿不准。", "target_lang": "zh", "intent": "share", "cultural_notes": [], "safety": "ok"}
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
+                patch.object(ai, "rewrite_expression", return_value=result) as rewrite:
+            response = self.request("POST", "/api/expression/translate", body)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, result)
+        rewrite.assert_called_once_with(body["text"], "zh", emotion="anxiety", mode="clarify")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM entries"), 0)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM ai_cache"), 0)
+
+    def test_expression_translation_returns_service_unavailable_when_ai_is_disabled(self):
+        body = {"text": "I feel a little unsure.", "target_lang": "zh"}
+        with patch.object(ai, "rewrite_expression") as rewrite:
+            response = self.request("POST", "/api/expression/translate", body)
+        self.assertEqual(response.status, 503)
+        rewrite.assert_not_called()
+
+    def test_expression_translation_model_failure_is_a_soft_api_error(self):
+        body = {"text": "I feel a little unsure.", "target_lang": "zh"}
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
+                patch.object(ai, "rewrite_expression", side_effect=ai.AIError("provider timeout")):
+            response = self.request("POST", "/api/expression/translate", body)
+        self.assertEqual(response.status, 502)
+        self.assertIn("provider timeout", response.payload["error"])
+
     def test_legacy_cache_migration_preserves_records(self):
         self.request("POST", "/api/entries", self.entry())
         conn = db.connect()
