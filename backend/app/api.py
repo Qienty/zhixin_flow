@@ -565,17 +565,40 @@ def record_intervention(req: Request):
 def translate_expression(req: Request):
     """Explicitly convert a user's draft for a cross-language conversation.
 
+    Two shapes are accepted: a free draft (``text`` only) and a real situation
+    (``scene`` + ``details``) that produces a message the user can send as-is.
+
     This endpoint is separate from saving entries: a draft is never sent to the
     model unless the user presses the translation action, and the converted text
     is returned to the browser without being persisted.
     """
     body = req.json()
+    scene = body.get("scene") or ""
+    if not isinstance(scene, str) or (scene and scene not in ai.EXPRESSION_SCENES):
+        raise ApiError(400, "unknown scene")
+    tone = body.get("tone") or "polite"
+    if tone not in ai.EXPRESSION_TONES:
+        raise ApiError(400, "unknown tone")
+    relation = body.get("relation") or "peer"
+    if relation not in ai.EXPRESSION_RELATIONS:
+        raise ApiError(400, "unknown relation")
+    raw_details = body.get("details") or {}
+    if not isinstance(raw_details, dict) or set(raw_details) - set(ai.EXPRESSION_DETAILS):
+        raise ApiError(400, "unknown detail field")
+    details = {key: _clean_text(value, 200) for key, value in raw_details.items()}
+
     text = body.get("text")
-    if not isinstance(text, str) or not text.strip():
+    if text is not None and not isinstance(text, str):
         raise ApiError(400, "text is required")
-    text = text.strip()
+    text = (text or "").strip()
     if len(text) > 500:
         raise ApiError(422, "text is too long")
+    if not text and not any(details.values()):
+        raise ApiError(400, "text is required")
+    if not text and not scene:
+        # 没有正文时，只有场景能提供结构；否则模型拿到的是一段空白。
+        raise ApiError(400, "scene is required when text is empty")
+
     target_lang = body.get("target_lang")
     if target_lang not in ("zh", "en"):
         raise ApiError(400, "target_lang must be zh or en")
@@ -591,7 +614,10 @@ def translate_expression(req: Request):
         raise ApiError(503, message)
     with limits.analysis_slot(req.user["id"]):
         try:
-            result = ai.rewrite_expression(text, target_lang, emotion=emotion, mode=mode)
+            result = ai.rewrite_expression(
+                text, target_lang, emotion=emotion, mode=mode,
+                scene=scene, tone=tone, relation=relation, details=details,
+            )
         except ai.AIError as exc:
             message = _redact(str(exc))[:200] or ("AI 暂时不可用" if req.lang == "zh" else "AI is temporarily unavailable")
             raise ApiError(502, message) from exc
@@ -731,6 +757,67 @@ def practice_summary(req: Request):
                 "feedback": {key: sum(r["relief"] == key for r in completed) for key in ("better", "same", "worse")}}
     finally:
         conn.close()
+
+
+@router.route("GET", "/api/weekly-card")
+def weekly_card(req: Request):
+    """这一周能核对的证据：记录、强度、练习前后评分，以及与前一周的对照。
+
+    纯聚合，不调用模型：数字由代码算，文案由前端按当前语言拼。
+    练习的 before/after 评分在这里第一次进入主流程，而不只是练习页的历史。
+    """
+    days = 7
+    since, today = _dates(req, days)
+    start = datetime.fromisoformat(since).date()
+    prev_since = (start - timedelta(days=days)).isoformat()
+    prev_until = (start - timedelta(days=1)).isoformat()
+    uid = req.user["id"]
+    conn = _connect()
+    try:
+        current = conn.execute(
+            "SELECT COUNT(*) AS count, "
+            "COALESCE(SUM(CASE WHEN severity >= 4 THEN 1 ELSE 0 END), 0) AS severe, "
+            "COUNT(DISTINCT local_date) AS days "
+            "FROM entries WHERE user_id = ? AND local_date BETWEEN ? AND ?",
+            (uid, since, today)).fetchone()
+        previous = conn.execute(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(CASE WHEN severity >= 4 THEN 1 ELSE 0 END), 0) AS severe "
+            "FROM entries WHERE user_id = ? AND local_date BETWEEN ? AND ?",
+            (uid, prev_since, prev_until)).fetchone()
+        top = conn.execute(
+            "SELECT emotion, COUNT(*) AS c FROM entries WHERE user_id = ? AND local_date BETWEEN ? AND ? "
+            "GROUP BY emotion ORDER BY c DESC, emotion LIMIT 1",
+            (uid, since, today)).fetchone()
+        rows = conn.execute(
+            "SELECT status, before_score, after_score, relief FROM practice_sessions "
+            "WHERE user_id = ? AND local_date BETWEEN ? AND ?",
+            (uid, since, today)).fetchall()
+    finally:
+        conn.close()
+    completed = [row for row in rows if row["status"] == "completed"]
+    paired = [row for row in completed if row["before_score"] is not None and row["after_score"] is not None]
+    return {
+        "days": days,
+        "since": since,
+        "until": today,
+        "entries": {
+            "count": current["count"],
+            "severe": current["severe"],
+            "days": current["days"],
+            "top_emotion": top["emotion"] if top else None,
+        },
+        "previous": {"count": previous["count"], "severe": previous["severe"], "since": prev_since, "until": prev_until},
+        "practices": {
+            "completed": len(completed),
+            "paired": len(paired),
+            "before_average": round(sum(r["before_score"] for r in paired) / len(paired), 1) if paired else None,
+            "after_average": round(sum(r["after_score"] for r in paired) / len(paired), 1) if paired else None,
+            "drops": sum(1 for r in paired if r["after_score"] < r["before_score"]),
+            "better": sum(r["relief"] == "better" for r in completed),
+            "same": sum(r["relief"] == "same" for r in completed),
+            "worse": sum(r["relief"] == "worse" for r in completed),
+        },
+    }
 
 
 @router.route("GET", r"/api/practice-sessions/(?P<session_id>\d+)")

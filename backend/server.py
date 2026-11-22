@@ -40,7 +40,7 @@ mimetypes.add_type("application/json; charset=utf-8", ".json")
 class Handler(BaseHTTPRequestHandler):
     server_version = f"ZhiXinYuanLiu/{__version__}"
     protocol_version = "HTTP/1.1"
-    timeout = 30
+    timeout = 65  # 仅作默认占位；setup() 会按 TETHER_HTTP_TIMEOUT 重新设置
 
     def setup(self):
         # 65 秒：必须长于客户端（浏览器 / Node）复用空闲连接的窗口。

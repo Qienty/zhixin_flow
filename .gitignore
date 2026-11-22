@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .runtime/
 .cache/
+.taste-skill/
 backend/data/*.db-wal
 backend/data/*.db-shm
 

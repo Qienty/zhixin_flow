@@ -4,6 +4,7 @@ import { api, setApiLang, tzOffset } from "./api.js";
 import { t, setLang, getLang, applyStaticText } from "./i18n.js";
 import { createPracticeController } from "./practices.js";
 import { createExpressionController } from "./expression.js";
+import { createCrossingController } from "./crossing.js";
 
 /* ------------------------------------------------------------- 常量与状态 */
 
@@ -50,6 +51,7 @@ const state = {
   logError: "",
   insights: null,
   stats: null,
+  weekly: null,
   /* AI 只在用户点击分析后运行，统计始终可以直接查看。 */
   aiBusy: false,
   aiError: "",
@@ -406,6 +408,7 @@ function invalidateInsights() {
   state.aiBusy = false;
   state.insights = null;
   state.stats = null;
+  state.weekly = null;
   state.aiError = "";
 }
 
@@ -418,10 +421,11 @@ let analysisController = null;
 async function loadInsights() {
   const seq = ++insightsSeq;
   const analysisSeq = aiSeq;
-  const [ins, stats] = await Promise.all([api.insights(), api.stats()]);
+  const [ins, stats, weekly] = await Promise.all([api.insights(), api.stats(), api.weeklyCard()]);
   if (seq !== insightsSeq || analysisSeq !== aiSeq) return false;
   state.insights = ins;
   state.stats = stats;
+  state.weekly = weekly;
   loadedAt.insights = Date.now();
   // Model calls only happen after an explicit analyze action.
   return true;
@@ -562,7 +566,7 @@ window.addEventListener("popstate", (event) => {
   }
   if (restoreCrisis()) return;
   if (sessionExpired) { renderAuth(); return; }
-  if (overlayInHistory && (iv.saving || expression.busy)) {
+  if (overlayInHistory && (iv.saving || expression.busy || crossing.busy)) {
     history.pushState({ view: state.view, overlay: true }, '', location.hash);
     return;
   }
@@ -692,11 +696,15 @@ function viewNow() {
         <h1 class="display">${t("now.question")}</h1>
         <p class="small">${t("now.hint")}</p>
       </div>
-      <img class="hero-landscape" src="./assets/landscape.svg" alt="" aria-hidden="true" width="840" height="600" />
     </section>
 
-    ${expression.card()}
+    <div class="home-workspace">
+    <div class="stack gap-16">
+      ${expression.card()}
+      ${crossing.card()}
+    </div>
 
+    <aside class="home-aside stack gap-16">
     <section class="emotion-section stack gap-12">
       <div class="row-between">
         <h2 class="eyebrow">${t("now.primary_label")}</h2>
@@ -708,6 +716,8 @@ function viewNow() {
     </section>
 
     ${wheelCard()}
+    </aside>
+    </div>
 
     ${
       empty
@@ -1119,6 +1129,41 @@ function proBlock(ins) {
   </div>`;
 }
 
+/* 每周证据卡：把「记录」和「练习前后评分」放在同一屏，回答「我到底有没有变化」。
+   数字全部来自 /api/weekly-card，文案在这里按当前语言拼，不经过模型。 */
+function weeklyCard() {
+  const card = state.weekly;
+  if (!card) return `<div class="skeleton" style="height:104px;border-radius:20px"></div>`;
+  const entries = card.entries || {};
+  const practice = card.practices || {};
+  const previous = card.previous || {};
+  const lines = [];
+  lines.push(entries.count ? t("week.entries", { n: entries.count, severe: entries.severe || 0 }) : t("week.entries_none"));
+  if (practice.completed) lines.push(t("week.practices", { n: practice.completed }));
+  else lines.push(t("week.practices_none"));
+  if (practice.paired) {
+    lines.push(t("week.paired", { n: practice.paired, before: practice.before_average, after: practice.after_average }));
+    if (practice.drops) lines.push(t("week.drops", { n: practice.drops }));
+  }
+  if (previous.count || entries.count) {
+    const key = entries.severe < previous.severe ? "week.compare_down"
+      : entries.severe > previous.severe ? "week.compare_up" : "week.compare_same";
+    lines.push(t(key, { prev: previous.severe || 0, now: entries.severe || 0 }));
+  }
+  const empty = !entries.count && !practice.completed;
+  return `<section class="card week-card stack gap-12" aria-labelledby="week-title">
+    <div class="row-between">
+      <h2 class="section-title" id="week-title">${t("week.title")}</h2>
+      <span class="tiny">${esc(card.since)} — ${esc(card.until)}</span>
+    </div>
+    ${empty
+      ? `<p class="small">${t("week.empty_title")}</p><p class="tiny">${t("week.empty_body")}</p>
+         <button class="btn soft sm" data-act="nav" data-view="practice" style="align-self:flex-start">${t("week.go_practice")}</button>`
+      : `<ul class="week-lines">${lines.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>`}
+    <p class="tiny">${t("week.note")}</p>
+  </section>`;
+}
+
 function viewInsights() {
   const ins = state.insights;
   return `<div class="stack gap-16">
@@ -1134,6 +1179,7 @@ function viewInsights() {
             <div class="skeleton" style="height:150px;border-radius:22px"></div>
           </div>`
         : `<div class="stack gap-24">
+          ${weeklyCard()}
           <div class="stack gap-12">
             <h2 class="eyebrow">${t("ins.basic")}</h2>
             ${basicBlock(state.stats)}
@@ -1313,6 +1359,7 @@ function destroyOverlay() {
   ++crisisSeq;
   expression.detach();
   practice.dispose();
+  crossing.detach();
   iv.draft = null;
   iv.token += 1;
   iv.nodes = null;
@@ -1332,7 +1379,7 @@ function destroyOverlay() {
 
 function closeOverlay() {
   if (restoreCrisis()) { pendingPop += 1; history.back(); return; }
-  if (iv.saving || expression.busy) return;
+  if (iv.saving || expression.busy || crossing.busy) return;
   if (practice.active) { practice.leave(); return; }
   const popNeeded = overlayInHistory;
   destroyOverlay();
@@ -2132,6 +2179,7 @@ function closeAndSync() {
 const practice = createPracticeController({
   api, t, esc, getLang, tzOffset, overlay, render, open: openOverlay,
   close: () => { closeOverlay(); render(); }, confirm: askConfirm, toast, support: openCrisis,
+  completed: () => { state.weekly = null; loadedAt.insights = 0; },
 });
 
 const expression = createExpressionController({
@@ -2147,6 +2195,11 @@ const expression = createExpressionController({
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
+});
+
+const crossing = createCrossingController({
+  api, t, esc, getLang, overlay, open: openOverlay, close: closeOverlay, toast,
+  getAccount: () => state.account,
 });
 
 const ACTIONS = {
@@ -2280,6 +2333,10 @@ document.addEventListener("click", async (event) => {
     try { await practice.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
     return;
   }
+  if (node.dataset.act.startsWith("c-")) {
+    try { await crossing.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
+    return;
+  }
   if (action) {
     try { await action(node, event); } catch (err) { toast(err.message); }
   }
@@ -2288,6 +2345,7 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("input", (event) => {
   expression.input(event.target);
   practice.input(event.target);
+  crossing.input(event.target);
   if (event.target.name === 'new_password') {
     const value = event.target.value;
     const key = value.length < 8 ? 'auth.hint_pass' : value.length < 12 || new Set(value).size < 4 ? 'me.password_fair' : 'me.password_stronger';
@@ -2298,6 +2356,7 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   expression.change(event.target);
+  crossing.change(event.target);
   if (event.target.id === "import-file") { await importFile(event.target.files[0]); event.target.value = ""; return; }
   const node = event.target.closest("[data-act='region']");
   if (!node) return;
@@ -2593,13 +2652,10 @@ async function saveWheel() {
   }
 }
 
-/* 首页入口卡：一个小小的转盘图形 + 一句话，不说「小游戏」 */
+/* 首页入口沿用转盘语义，用单色线条与真实转盘弹层区分。 */
 function wheelCard() {
-  const slices = [0, 60, 120, 180, 240, 300]
-    .map((deg, i) => `hsl(${deg} 34% ${theme.resolved === "dark" ? 30 : 82}%) ${deg}deg ${deg + 60}deg`)
-    .join(", ");
   return `<button class="wheel-entry" data-act="wheel">
-    <span class="wheel-entry-mark" style="background:conic-gradient(${slices})" aria-hidden="true"></span>
+    <span class="wheel-entry-mark" aria-hidden="true"><svg viewBox="0 0 28 28" fill="none"><circle cx="14" cy="14" r="10" stroke="currentColor" stroke-width="1.4"/><path d="M14 4v6m0 8v6M5.3 9l5.2 3m7 4 5.2 3M5.3 19l5.2-3m7-4 5.2-3" stroke="currentColor" stroke-width="1.4"/><circle cx="14" cy="14" r="3" stroke="currentColor" stroke-width="1.4"/></svg></span>
     <span class="wheel-entry-text">
       <span class="label">${t("wheel.card_title")}</span>
       <span class="sub">${t("wheel.card_sub")}</span>
@@ -2625,7 +2681,7 @@ function renderAuth(mode = "login") {
       <div class="language-switch" role="group" aria-label="${t("me.lang")}"><button class="${getLang() === "zh" ? "on" : ""}" aria-pressed="${getLang() === "zh"}" data-act="lang" data-lang="zh">中文</button><button class="${getLang() === "en" ? "on" : ""}" aria-pressed="${getLang() === "en"}" data-act="lang" data-lang="en">EN</button></div>
     </div>
     <section class="auth-intro stack gap-10">
-      <div class="auth-landscape"><img src="./assets/landscape.svg" alt="" width="840" height="600" /><span class="landscape-caption" aria-hidden="true">A LITTLE SPACE TO FEEL.</span></div>
+      <div class="auth-landscape"><img src="./assets/landscape.svg" alt="" width="840" height="600" /></div>
       <h1 class="display">${t("auth.headline")}</h1>
       <p class="small">${t("auth.slogan")}</p>
     </section>
@@ -2649,7 +2705,7 @@ function renderAuth(mode = "login") {
     <div class="auth-support stack gap-4">
       <details class="small"><summary>${t("auth.privacy_title")}</summary><p>${t("auth.privacy")}</p></details>
       <details class="small"><summary>${t("auth.forgot")}</summary><p>${t("auth.forgot_help")}</p></details>
-      <button class="auth-help row-between" data-act="open-crisis"><span><span aria-hidden="true">♡</span> ${t("crisis.title")}</span><span aria-hidden="true">↗</span></button>
+      <button class="auth-help row-between" data-act="open-crisis"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7-4.4-7-9.5A4.2 4.2 0 0 1 12 8a4.2 4.2 0 0 1 7 2.5C19 15.6 12 20 12 20Z" fill="none" stroke="currentColor" stroke-width="1.5"/></svg> ${t("crisis.title")}</span><span aria-hidden="true">↗</span></button>
     </div>
     <p class="page-footnote tiny">${t("auth.footer")}</p>
   </div>`;
@@ -2755,7 +2811,7 @@ function openRedeem() {
       ${[t("pay.f1"), t("pay.f2"), t("pay.f3")]
         .map(
           (line) => `<div class="row gap-8" style="align-items:flex-start">
-            <span style="color:var(--moss);font-weight:700" aria-hidden="true">✓</span>
+            <svg class="check-mark" viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 4 4 8-8" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
             <span class="small" style="color:var(--ink-2)">${line}</span>
           </div>`
         )

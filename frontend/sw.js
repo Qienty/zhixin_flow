@@ -22,6 +22,7 @@ const SHELL = [
   "./js/api.js",
   "./js/practices.js",
   "./js/expression.js",
+  "./js/crossing.js",
   "./js/i18n.js",
   "./js/theme-init.js",
   "./js/register-sw.js",

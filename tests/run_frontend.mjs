@@ -11,6 +11,7 @@ const clientSource = await read("frontend/js/api.js");
 const i18nSource = await read("frontend/js/i18n.js");
 const practiceSource = await read("frontend/js/practices.js");
 const expressionSource = await read("frontend/js/expression.js");
+const crossingSource = await read("frontend/js/crossing.js");
 const plain = (source) => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -61,6 +62,9 @@ function app(overrides = {}) {
     account: async () => { calls.push("account"); return { pro: false, user: { id: 1 } }; },
     entries: async () => { calls.push("entries"); return { items: [{ id: 8 }], total: 8, next_cursor: null }; },
     insights: async () => { calls.push("insights"); return { sample: { entries: 8 } }; },
+    weeklyCard: async () => { calls.push("weekly"); return { days: 7, since: today, until: today,
+      entries: { count: 0, severe: 0, days: 0, top_emotion: null }, previous: { count: 0, severe: 0 },
+      practices: { completed: 0, paired: 0, before_average: null, after_average: null, drops: 0, better: 0, same: 0, worse: 0 } }; },
     stats: async () => { calls.push("stats"); return { entries: 8 }; },
     cancelPending: () => calls.push("cancel"), logout: async () => {}, ...overrides,
   };
@@ -77,11 +81,11 @@ function app(overrides = {}) {
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, clearInterval() {}, requestAnimationFrame: () => 1,
     t: (key) => key, getLang: () => "zh", tzOffset: () => 480, messages,
   });
-  vm.runInContext(plain(expressionSource) + '\n' + plain(practiceSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
+  vm.runInContext(plain(expressionSource) + '\n' + plain(practiceSource) + '\n' + plain(crossingSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
     globalThis.renders = 0;
     render = () => { ++globalThis.renders; }; renderAuth = () => {}; renderLogList = () => {};
     toast = (message) => messages.push(message);
-    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay, expression, practice, wheel };
+    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay, expression, practice, crossing, wheel };
   `, context);
   Object.assign(context.hooks.state, { account: { user: { id: 1 } }, home: { local_today: today }, logReady: true, insights: { old: true } });
   context.hooks.overlay.hidden = true;
@@ -89,7 +93,7 @@ function app(overrides = {}) {
 }
 
 test("JavaScript syntax and Chinese/English key parity", async () => {
-  for (const file of ["app", "api", "i18n", "practices", "expression", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
+  for (const file of ["app", "api", "i18n", "practices", "expression", "crossing", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
   const context = vm.createContext({});
   vm.runInContext(plain(i18nSource) + "\nglobalThis.tables = dict;", context);
   assert.deepEqual(Object.keys(context.tables.zh).sort(), Object.keys(context.tables.en).sort());
@@ -549,6 +553,79 @@ test("Service worker precache failure rejects install before taking over", async
   handlers.get('install')({ waitUntil: promise => { install = promise; } });
   await assert.rejects(install, /missing shell/);
   assert.deepEqual(calls, []);
+});
+
+test("Home offers the cross-language entry and the weekly evidence card", async () => {
+  const a = app();
+  Object.assign(a.hooks.state, {
+    meta: { emotions: [] },
+    home: { items: [], total: 0, watch: false, local_today: "2026-11-22" },
+  });
+  const home = a.context.viewNow();
+  for (const id of ["deadline", "decline", "apologize", "ask_help", "conflict", "bad_news", "negotiate", "boundary"]) {
+    assert.ok(home.includes(`data-act="c-start" data-id="${id}"`), id);
+  }
+  assert.ok(home.includes("cross-card"));
+  a.hooks.state.weekly = {
+    days: 7, since: "2026-11-16", until: "2026-11-22",
+    entries: { count: 2, severe: 1, days: 2, top_emotion: "anger" },
+    previous: { count: 1, severe: 0 },
+    practices: { completed: 1, paired: 1, before_average: 5, after_average: 3, drops: 1, better: 1, same: 0, worse: 0 },
+  };
+  a.hooks.state.insights = { sample: { entries: 2 } };
+  const insights = a.context.viewInsights();
+  assert.ok(insights.includes("week-lines"));
+  assert.ok(insights.includes("week.entries"));
+  assert.ok(insights.includes("week.practices"));
+  assert.ok(insights.includes("week.paired"));
+  assert.ok(insights.includes("week.drops"));
+  assert.ok(insights.includes("week.compare_up") || insights.includes("week.compare_down"));
+});
+
+test("Weekly card shows an empty state instead of zeros", async () => {
+  const a = app();
+  a.hooks.state.weekly = {
+    days: 7, since: "2026-11-16", until: "2026-11-22",
+    entries: { count: 0, severe: 0, days: 0, top_emotion: null },
+    previous: { count: 0, severe: 0 },
+    practices: { completed: 0, paired: 0, before_average: null, after_average: null, drops: 0, better: 0, same: 0, worse: 0 },
+  };
+  a.hooks.state.insights = { sample: { entries: 0 } };
+  const insights = a.context.viewInsights();
+  assert.ok(insights.includes("week.empty_title"));
+  assert.ok(!insights.includes("week-lines"));
+});
+
+test("Cross-language scene flow asks for details before calling the model", async () => {
+  let calls = 0;
+  const a = app({ translateExpression: async () => { calls++; return { text: "x", alternatives: [], cultural_notes: [] }; } });
+  await a.hooks.crossing.handle("start", { dataset: { id: "deadline" } });
+  const html = a.hooks.overlay.innerHTML;
+  assert.ok(html.includes("cross.field_what"));
+  assert.ok(html.includes("data-cross-field=\"want\""));
+  assert.ok(html.includes('data-act="c-generate"'));
+  await a.hooks.crossing.handle("generate", { dataset: {} });
+  assert.equal(calls, 0, "an empty form must not reach the model");
+});
+
+test("Cross-language result exposes copy and an alternative tone", async () => {
+  let sent = null;
+  const a = app({ translateExpression: async (payload) => {
+    sent = payload;
+    return { text: "I can't take this on this week.", alternatives: [{ tone: "direct", text: "No, not this week." }], cultural_notes: ["先给结论"], intent: "ask_space" };
+  } });
+  await a.hooks.crossing.handle("start", { dataset: { id: "decline" } });
+  a.hooks.crossing.input({ dataset: { crossField: "what" }, value: "加班" });
+  await a.hooks.crossing.handle("generate", { dataset: {} });
+  assert.equal(sent && sent.details && sent.details.what, "加班");
+  assert.equal(Object.keys(sent.details).length, 1);
+  assert.equal(sent.scene, "decline");
+  assert.equal(sent.target_lang, "en");
+  const html = a.hooks.overlay.innerHTML;
+  assert.ok(html.includes("I can&#39;t take this on this week."), html.slice(0, 400));
+  assert.ok(html.includes("data-act=\"c-copy\""));
+  assert.ok(html.includes("No, not this week."));
+  assert.ok(html.includes("先给结论"));
 });
 
 let failures = 0;

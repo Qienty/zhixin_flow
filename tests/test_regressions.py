@@ -165,7 +165,10 @@ class Regressions(unittest.TestCase):
             response = self.request("POST", "/api/expression/translate", body)
         self.assertEqual(response.status, 200)
         self.assertEqual(response.payload, result)
-        rewrite.assert_called_once_with(body["text"], "zh", emotion="anxiety", mode="clarify")
+        rewrite.assert_called_once_with(
+            body["text"], "zh", emotion="anxiety", mode="clarify",
+            scene="", tone="polite", relation="peer", details={},
+        )
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM entries"), 0)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM ai_cache"), 0)
 
@@ -183,6 +186,65 @@ class Regressions(unittest.TestCase):
             response = self.request("POST", "/api/expression/translate", body)
         self.assertEqual(response.status, 502)
         self.assertIn("provider timeout", response.payload["error"])
+
+    def test_expression_scene_validates_fields_and_builds_a_sendable_message(self):
+        base = {"target_lang": "en", "scene": "deadline", "tone": "polite", "relation": "professor",
+                "details": {"what": "初稿", "when": "周五", "want": "下周三", "extra": "分析还要时间"}}
+        result = {"text": "Dear Prof. Lee, could I move the draft?", "target_lang": "en", "intent": "ask_advice",
+                  "cultural_notes": ["先给结论"], "alternatives": [{"tone": "direct", "text": "Hi Prof. Lee — could I move it?"}],
+                  "safety": "ok"}
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
+                patch.object(ai, "rewrite_expression", return_value=result) as rewrite:
+            response = self.request("POST", "/api/expression/translate", base)
+            # A scene may send details with no free text at all. Another account
+            # keeps the per-account model cooldown out of this assertion.
+            blank_text = self.request("POST", "/api/expression/translate", {**base, "text": ""}, user=1)
+        self.assertEqual(response.status, 200, response.payload)
+        self.assertEqual(response.payload["alternatives"][0]["tone"], "direct")
+        self.assertEqual(blank_text.status, 200, blank_text.payload)
+        rewrite.assert_called_with(
+            "", "en", emotion="", mode="space", scene="deadline", tone="polite",
+            relation="professor", details={"what": "初稿", "when": "周五", "want": "下周三", "extra": "分析还要时间"},
+        )
+
+    def test_expression_scene_rejects_unknown_values_and_empty_requests(self):
+        base = {"target_lang": "en", "scene": "deadline", "details": {"what": "x"}}
+        cases = [
+            {**base, "scene": "promotion"},
+            {**base, "tone": "rude"},
+            {**base, "relation": "boss"},
+            {**base, "details": {"budget": "100"}},
+            {**base, "details": {"what": "x" * 201}},
+            {"target_lang": "en"},
+            {"target_lang": "en", "scene": "deadline", "details": {}},
+        ]
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
+                patch.object(ai, "rewrite_expression") as rewrite:
+            for body in cases:
+                self.assertEqual(self.request("POST", "/api/expression/translate", body).status, 400, body)
+        rewrite.assert_not_called()
+
+    def test_expression_scene_alternatives_are_validated_and_bounded(self):
+        raw = {
+            "text": "Could I move the draft to next Wednesday?",
+            "intent": "ask_advice",
+            "cultural_notes": ["a", "b", "c"],
+            "alternatives": [
+                {"tone": "direct", "text": "Hi — move the draft to Wednesday?"},
+                {"tone": "polite", "text": "Could I move the draft to next Wednesday?"},
+                {"tone": "rude", "text": "Move it."},
+                {"tone": "close", "text": "Could I move the draft to next Wednesday?"},
+                {"tone": "close", "text": "Any chance the draft could slip to Wednesday?"},
+                {"tone": "close", "text": "I think this is a diagnosis of my anxiety."},
+            ],
+            "safety": "ok",
+        }
+        validated = ai._validate_expression(raw, "en")
+        self.assertEqual(len(validated["alternatives"]), 2)
+        self.assertEqual(validated["alternatives"][0]["tone"], "direct")
+        self.assertEqual(validated["alternatives"][1]["text"], "Any chance the draft could slip to Wednesday?")
+        self.assertEqual(len(validated["cultural_notes"]), 2)
+        self.assertEqual(validated["target_lang"], "en")
 
     def test_legacy_cache_migration_preserves_records(self):
         self.request("POST", "/api/entries", self.entry())

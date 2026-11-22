@@ -132,6 +132,36 @@ class PracticeTests(unittest.TestCase):
         self.assertEqual(stopped["status"], "stopped")
         self.assertEqual(stopped["step_index"], 0)
 
+    def test_weekly_card_puts_practice_scores_into_the_main_flow(self):
+        self.request("POST", "/api/entries", self.entry(severity=5, cause="deadline"))
+        self.request("POST", "/api/entries", self.entry(severity=2, cause="walk"))
+        self.complete(self.start(client_id="weekly-pair", before_score=5), after_score=3, relief="better")
+        self.complete(self.start(client_id="weekly-unrated"))
+        card = self.request("GET", "/api/weekly-card").payload
+        self.assertEqual(card["days"], 7)
+        self.assertEqual(card["entries"]["count"], 2)
+        self.assertEqual(card["entries"]["severe"], 1)
+        self.assertEqual(card["entries"]["top_emotion"], self.entry()["emotion"])
+        self.assertEqual(card["practices"]["completed"], 2)
+        self.assertEqual(card["practices"]["paired"], 1)
+        self.assertEqual(card["practices"]["before_average"], 5)
+        self.assertEqual(card["practices"]["after_average"], 3)
+        self.assertEqual(card["practices"]["drops"], 1)
+        self.assertEqual(card["practices"]["better"], 1)
+        self.assertEqual(card["previous"]["count"], 0)
+
+    def test_weekly_card_windows_by_local_day_and_stays_per_account(self):
+        old = (db.now_utc() - timedelta(days=9)).isoformat()
+        self.request("POST", "/api/entries", self.entry(severity=4, occurred_at=old))
+        card = self.request("GET", "/api/weekly-card").payload
+        self.assertEqual(card["entries"]["count"], 0)
+        self.assertEqual(card["previous"]["count"], 1)
+        self.assertEqual(card["previous"]["severe"], 1)
+        self.assertEqual(self.request("GET", "/api/weekly-card", user=1).payload["entries"]["count"], 0)
+        self.assertEqual(self.request("GET", "/api/weekly-card", user=1).payload["previous"]["count"], 0)
+        unauthenticated = api.dispatch(api.Request("GET", "/api/weekly-card", {}, b"", {}))
+        self.assertEqual(unauthenticated.status, 401)
+
 
 if __name__ == "__main__":
     unittest.main()

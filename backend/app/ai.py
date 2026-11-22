@@ -167,7 +167,33 @@ EXPRESSION_SYSTEM_PROMPT = """你是智心元流的跨语言表达编辑器。�
 - 输出只能是 JSON，不要代码块，不要解释：
 {"text":"改写后的正文","intent":"share|ask_listening|ask_space|ask_advice|unclear","cultural_notes":["最多两条简短说明"],"safety":"ok"}
 - cultural_notes 只在确实有帮助时填写，例如语气变得更直接或保留了“暂时不想要建议”的边界；没有说明时返回空数组。
+
+当 payload 带 scene 时，你不再是逐字改写，而是写一条可以直接发出去的消息：
+- 按 scene_guide 给的结构组织段落，details 里的事实照用，不许编造时间、原因或承诺。
+- relation 决定称谓与敬语层级：professor / manager / client 用正式称谓和缓冲句；peer 是同级的同事或同学；friend 是熟人朋友的口语。
+- tone 决定直接程度：polite 保留缓冲与致意；direct 结论前置、少绕弯；close 口语、亲近但不越界。
+- 必须再给 1 条 alternatives，用于换一种语气；它的 tone 与主版本不同，内容仍受同样的规则约束。
+- 输出仍然只能是 JSON：
+{"text":"主版本","intent":"share|ask_listening|ask_space|ask_advice|unclear","cultural_notes":["最多两条简短说明"],"alternatives":[{"tone":"polite|direct|close","text":"备选版本"}],"safety":"ok"}
 """
+
+EXPRESSION_SCENES = ("deadline", "decline", "apologize", "ask_help", "conflict", "bad_news", "negotiate", "boundary")
+EXPRESSION_TONES = ("polite", "direct", "close")
+EXPRESSION_RELATIONS = ("professor", "manager", "client", "peer", "friend")
+EXPRESSION_DETAILS = ("what", "when", "want", "extra")
+
+# 每个场景只交代「先说哪一句、别说什么」。事实仍由用户填写，
+# 模型负责把它们排成对方语言里说得出口的顺序。
+SCENE_GUIDE = {
+    "deadline": "说明来意 → 原定时间 → 希望改到的时间 → 一句承诺或补救。新时间要具体；不要用一段辩解代替请求，也不要反复道歉。",
+    "decline": "先给明确的结论（这次不行），再给一句简短理由，最后给一个可选的替代方案。不要用「可能之后吧」这类模糊承诺拖住对方。",
+    "apologize": "承认具体行为 → 说明影响 → 给出补救。不要用「如果你觉得不舒服」这类条件式道歉，也不要把责任推给客观情况。",
+    "ask_help": "说清具体要什么帮助 → 需要的时间 → 为什么找对方。请求要小到对方能直接回答，不要用自我贬低换取同情。",
+    "conflict": "描述发生了什么（事实）→ 自己的感受 → 具体请求（希望对方以后怎么做）。不要用「你总是」这类指责句式，也不要替对方下结论。",
+    "bad_news": "结论先行 → 影响范围 → 已经做的应对 → 下一步。不要把坏消息埋在长铺垫后面。",
+    "negotiate": "说清自己的价值或处境 → 具体请求 → 可以接受的替代方案。避免威胁式或最后通牒式措辞。",
+    "boundary": "用「我需要」表达边界 → 一个具体可执行的安排。不要用「你从来」开头，也不要解释过多。",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -485,20 +511,46 @@ def _validate_expression(result: dict, target_lang: str) -> dict:
         value = str(note).strip()
         if value:
             notes.append(value[:160])
+    alternatives = []
+    for item in result.get("alternatives") or []:
+        if not isinstance(item, dict):
+            continue
+        alt_text = str(item.get("text") or "").strip()
+        alt_tone = str(item.get("tone") or "").strip().lower()
+        if not alt_text or alt_text == text or len(alt_text) > 1200 or alt_tone not in EXPRESSION_TONES:
+            continue
+        if safety_violation({"text": alt_text}):
+            continue
+        alternatives.append({"tone": alt_tone, "text": alt_text})
+        if len(alternatives) == 2:
+            break
     return {
         "text": text,
         "target_lang": "en" if target_lang == "en" else "zh",
         "intent": intent,
         "cultural_notes": notes[:2],
+        "alternatives": alternatives,
         "safety": "ok",
     }
 
 
-def rewrite_expression(text: str, target_lang: str, emotion: str = "", mode: str = "space") -> dict:
+def rewrite_expression(
+    text: str,
+    target_lang: str,
+    emotion: str = "",
+    mode: str = "space",
+    scene: str = "",
+    tone: str = "polite",
+    relation: str = "peer",
+    details: dict | None = None,
+) -> dict:
     """Convert a user's own words for a cross-language conversation.
 
     The caller must have obtained explicit user intent before invoking this function.
     The source text is sent only for this request and is not persisted by this module.
+
+    When ``scene`` is one of EXPRESSION_SCENES the model writes a sendable message
+    for that situation instead of translating a diary line.
     """
     cfg = config()
     if not cfg["enabled"]:
@@ -510,6 +562,16 @@ def rewrite_expression(text: str, target_lang: str, emotion: str = "", mode: str
         "emotion": emotion[:40],
         "mode": mode if mode in ("space", "clarify", "next") else "space",
     }
+    if scene in EXPRESSION_SCENES:
+        payload["scene"] = scene
+        payload["scene_guide"] = SCENE_GUIDE[scene]
+        payload["tone"] = tone if tone in EXPRESSION_TONES else "polite"
+        payload["relation"] = relation if relation in EXPRESSION_RELATIONS else "peer"
+        payload["details"] = {
+            key: str(value)[:200]
+            for key, value in (details or {}).items()
+            if key in EXPRESSION_DETAILS and str(value).strip()
+        }
     messages = [
         {"role": "system", "content": EXPRESSION_SYSTEM_PROMPT},
         {"role": "user", "content": "请处理以下 JSON，不要添加事实：\n" + json.dumps(payload, ensure_ascii=False)},

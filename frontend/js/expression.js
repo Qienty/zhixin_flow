@@ -67,7 +67,7 @@ export function createExpressionController({
 
   function card() {
     return `<section class="card expression-card stack gap-16" aria-labelledby="expression-home-title">
-      <div class="stack gap-6"><span class="eyebrow">${t("express.eyebrow")}</span><h2 class="section-title" id="expression-home-title">${t("express.title")}</h2></div>
+      <div class="stack gap-6"><h2 class="section-title" id="expression-home-title">${t("express.title")}</h2></div>
       ${field("text", "expression-home-text")}
       <p class="tiny expression-privacy">${t("express.memory")}</p>
       <button class="btn block" data-act="e-open">${t("express.open")} <span aria-hidden="true">→</span></button>

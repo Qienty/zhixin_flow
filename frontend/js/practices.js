@@ -57,7 +57,7 @@ export function createPracticeController(env) {
     return `<div class="practice-page stack gap-24"><header class="practice-heading"><p class="eyebrow">${tr('eyebrow')}</p><h1>${tr('title')}</h1><p class="small">${tr('intro')}</p></header>
       ${linkedId ? `<div class="practice-linked"><span>${tr('linked', { id: linkedId })}</span>${button('unlink', tr('unlink'), 'text-link')}</div>` : ''}
       ${loadError ? `<div class="practice-error" role="alert">${esc(loadError)}${button('reload', t('common.retry'))}</div>` : ''}
-      ${!ready ? `<p role="status" class="small">${tr('loading')}</p>` : `<section class="practice-library" aria-label="${tr('library')}">${items.map((p, i) => `<button class="practice-card" data-act="p-intro" data-id="${esc(p.id)}"><span class="practice-icon">${icon(p.icon)}</span><span class="practice-card-copy"><span class="practice-card-meta">0${i + 1} · ${tr('minutes', { n: p.minutes })}</span><strong>${esc(p.title)}</strong><span>${esc(p.subtitle)}</span></span><span class="practice-arrow" aria-hidden="true">↗</span></button>`).join('')}</section>
+      ${!ready ? `<p role="status" class="small">${tr('loading')}</p>` : `<section class="practice-library" aria-label="${tr('library')}">${items.map(p => `<button class="practice-card" data-act="p-intro" data-id="${esc(p.id)}"><span class="practice-icon">${icon(p.icon)}</span><span class="practice-card-copy"><span class="practice-card-meta">${tr('minutes', { n: p.minutes })}</span><strong>${esc(p.title)}</strong><span>${esc(p.subtitle)}</span></span><span class="practice-arrow" aria-hidden="true">↗</span></button>`).join('')}</section>
       <section class="practice-summary"><h2>${tr('recent')}</h2><div class="practice-metrics"><div><strong>${summary.completed}</strong><span>${tr('completed_count')}</span></div><div><strong>${summary.paired}</strong><span>${tr('paired_count')}</span></div></div>
       <p class="small">${summary.paired ? tr('averages', { before: summary.before_average, after: summary.after_average, n: summary.paired }) : tr('no_pairs')}</p><p class="tiny">${tr('summary_note')}</p></section>
       <section><div class="practice-section-head"><h2>${tr('history')}</h2><a class="text-link" href="${api.practiceExportUrl()}" download>${tr('export')}</a></div>
@@ -128,6 +128,10 @@ export function createPracticeController(env) {
       if (owner !== epoch || pending !== job) return;
       if (job.type === 'start') linkedId = null;
       pending = null; busy = false; accept(result, job.body.status === 'completed' || job.body.status === 'stopped');
+      // 前后评分落地后通知外层：总结页的「本周证据」需要重算。
+      if (result.status === 'completed' || result.status === 'stopped') {
+        try { env.completed?.(result); } catch { /* 外层刷新失败不影响练习保存 */ }
+      }
       if (job.after) job.after(); else present();
       void load();
     } catch (err) {

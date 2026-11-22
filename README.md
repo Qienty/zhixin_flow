@@ -28,6 +28,8 @@ python backend/server.py 8000
 
 跨语言表达接口为 `POST /api/expression/translate`，只接受当前草稿、目标语言和当前整理方式；服务端不持久化转换结果，并沿用 AI 账号并发与冷却限制。未配置 AI 服务时，原有本地表达、下载和账号保存流程仍可使用。
 
+首页同时提供两个入口：「记下此刻」保留原有自由表达；「说给对方听」是独立的跨境表达入口，内置 8 个真实场景（延期、拒绝、道歉、求助、冲突复盘、坏消息、争取、边界）。选一个场景、填 1—4 个空（发生了什么 / 原来的时间 / 你希望对方怎么做 / 补充），再选对方身份与语气，接口按场景写出一条可以直接复制发出去的消息，并附一个不同语气的备选版本和最多两条语气提示。接口新增可选字段 `scene`、`tone`（polite/direct/close）、`relation`（professor/manager/client/peer/friend）和 `details`；只传 `text` 时行为与原接口一致。场景与字段清单见 [跨境表达场景](docs/cross-border-scenes.md)。
+
 本轮需求依据、实现范围与验收方式见 [问卷驱动的项目改进](docs/survey-improvements.md)。
 
 ## 记录与 14 天边界
@@ -45,6 +47,8 @@ python backend/server.py 8000
 ## 自助练习
 
 底部「练习」页提供四个短练习，支持可选前后评分、分步引导、暂存续练、反馈、历史回看和独立 JSON 导出。可以从情绪记录进入并关联本次练习；清空情绪记录不会清空练习。界面保持手机单列布局。完整流程、接口、保存规则和测试方式见 [自助练习实现说明](docs/practices.md)。
+
+练习的前后评分不只留在练习页：结束后会让「总结」页的本周证据卡过期，下次进入总结时重算。证据卡把这一周的记录（条数、强度 4 以上的条数）与练习（完成次数、有前后评分的次数、平均从几分到几分、其中几次下降）放在一起，并给出与前一周的对照。数字全部由代码聚合，不经过模型，也不构成评估或诊断。
 
 关联只用于下一次成功开始的新练习。开始请求失败或响应丢失时，重试仍使用原请求及关联；成功开始后，后续新练习不再自动关联同一条情绪记录。
 
@@ -104,13 +108,13 @@ python -m app.codes --list
 
 Python 提供 CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy 和 Permissions-Policy，文本响应使用 UTF-8。页面脚本全部外置，匹配 CSP。未知 API 返回 JSON 404，未知静态路径返回 HTML 404；API 响应禁止缓存。
 
-静态文本支持 gzip、按编码区分的 ETag、Last-Modified、条件请求 304 和 HEAD；保留 `Vary: Accept-Encoding`。API 始终 `no-store`。连接默认空闲/读取超时 30 秒、最多 64 个活动连接线程，满载返回 503。超限请求体返回 413 并关闭连接；对已发送的上传最多额外排空 8 MiB + 64 KiB、等待 1 秒，任意大小或极慢上传仍可能断连，公网入口应配合代理的请求体与连接限制。
+静态文本支持 gzip、按编码区分的 ETag、Last-Modified、条件请求 304 和 HEAD；保留 `Vary: Accept-Encoding`。API 始终 `no-store`。连接默认空闲/读取超时 65 秒（须长于浏览器复用空闲连接的窗口）、最多 64 个活动连接线程，满载返回 503。超限请求体返回 413 并关闭连接；对已发送的上传最多额外排空 8 MiB + 64 KiB、等待 1 秒，任意大小或极慢上传仍可能断连，公网入口应配合代理的请求体与连接限制。
 
 以下参数应设在服务进程环境中；`.env` 在读取 AI 配置时才惰性加载，不能依赖它配置启动阶段的 HTTP/data 设置：
 
 | 参数 | 默认值 | 范围 / 含义 |
 |---|---|---|
-| `TETHER_HTTP_TIMEOUT` | 30 | 1—300 秒，socket 空闲/读取超时，不是整个 AI 调用总时限 |
+| `TETHER_HTTP_TIMEOUT` | 65 | 1—300 秒，socket 空闲/读取超时，不是整个 AI 调用总时限；低于浏览器复用空闲连接的时间会在客户端正要复用连接时把它踢掉 |
 | `TETHER_HTTP_MAX_CONNECTIONS` | 64 | 1—512，活动连接线程上限 |
 | `TETHER_AI_MIN_INTERVAL` | 60 | 1—3600 秒，每账号模型调用开始间隔 |
 | `TETHER_AI_MAX_CONCURRENT` | 4 | 1—64，全进程同时分析数 |
@@ -141,6 +145,7 @@ Python 提供 `sw.js` 时自动将前端资产内容 hash 注入缓存版本。�
 | GET/POST/DELETE | `/api/entries` | 游标分页 / 保存记录 / 清空当前账号情绪记录 |
 | GET/PATCH/DELETE | `/api/entries/{id}` | 读取、补全、删除单条 |
 | GET | `/api/stats/basic`、`/api/insights` | 固定 14 天的统计与缓存；days 若传只能为 14 |
+| GET | `/api/weekly-card` | 最近 7 天可核对的记录与练习前后评分，并带前一周对照 |
 | POST | `/api/insights/analyze` | 手动 AI 分析，body 可传 force |
 | POST | `/api/import` | JSON entries 数组，原子追加并去重 |
 | GET | `/api/export?format=json或csv` | 全量导出，CSV 文本带公式注入防护 |

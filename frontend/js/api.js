@@ -107,6 +107,7 @@ export const api = {
     call("/api/expression/translate", { method: "POST", body: payload, signal, timeout: 120000 }),
 
   stats: () => call("/api/stats/basic"),
+  weeklyCard: () => call("/api/weekly-card"),
   insights: () => call("/api/insights"),
   /* 唯一会阻塞几秒的接口：让模型重写这一屏的结论 */
   analyzeInsights: (force = false, signal) =>
