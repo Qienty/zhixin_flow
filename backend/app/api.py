@@ -15,7 +15,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import __version__, ai, auth, content, db, insights, practices, seed, limits
+from . import __version__, ai, auth, content, db, insights, practices, pragmatics, seed, limits
 
 # 没有订阅、没有支付：Pro 只能靠兑换码开通（见 auth.redeem）
 
@@ -48,6 +48,7 @@ class Request:
         # 由 dispatch 填：当前登录用户 + 会话 token
         self.user: dict | None = None
         self.sid: str = ""
+        self.token: str = ""
         self.client_ip: str = "unknown"
 
     def q(self, key: str, default: str | None = None) -> str | None:
@@ -359,10 +360,14 @@ def meta(req: Request):
     payload["plan"] = user["plan"] if user else "free"
     payload["region"] = user["region"] if user else db.DEFAULTS["region"]
     payload["lang"] = user["lang"] if user else "zh"
+    # False 表示账号语言只是默认值：前端应让浏览器语言优先。
+    payload["lang_set"] = bool(user.get("lang_set")) if user else False
     payload["has_data"] = (
         bool(_rows("SELECT id FROM entries WHERE user_id = ? LIMIT 1", [user["id"]])) if user else False
     )
     payload["ai"] = ai.public_config()
+    # 前端据此渲染语言下拉框：加一门语言只改 TETHER_LANGUAGES，不改界面代码。
+    payload["languages"] = pragmatics.options(req.lang)
     return payload
 
 
@@ -600,8 +605,8 @@ def translate_expression(req: Request):
         raise ApiError(400, "scene is required when text is empty")
 
     target_lang = body.get("target_lang")
-    if target_lang not in ("zh", "en"):
-        raise ApiError(400, "target_lang must be zh or en")
+    if not isinstance(target_lang, str) or not pragmatics.is_enabled(target_lang):
+        raise ApiError(400, "target_lang is not enabled")
     mode = body.get("mode") or "space"
     if mode not in ("space", "clarify", "next"):
         raise ApiError(400, "invalid expression mode")
@@ -622,6 +627,60 @@ def translate_expression(req: Request):
             message = _redact(str(exc))[:200] or ("AI 暂时不可用" if req.lang == "zh" else "AI is temporarily unavailable")
             raise ApiError(502, message) from exc
     return result
+
+
+@router.route("POST", "/api/expression/interpret")
+def interpret_expression(req: Request):
+    """反向链路：对方发来的一句话是什么意思、语气多重、可以怎么回。
+
+    和 /api/expression/translate 一样：只有用户主动点击才会发送，不落库，
+    并沿用同一套 AI 并发与冷却限制。
+    """
+    body = req.json()
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ApiError(400, "text is required")
+    text = text.strip()
+    if len(text) > 500:
+        raise ApiError(422, "text is too long")
+    source_lang = body.get("source_lang") or "en"
+    if not isinstance(source_lang, str) or not pragmatics.is_enabled(source_lang):
+        raise ApiError(400, "source_lang is not enabled")
+    target_lang = body.get("target_lang") or "zh"
+    if not isinstance(target_lang, str) or not pragmatics.is_enabled(target_lang):
+        raise ApiError(400, "target_lang is not enabled")
+    relation = body.get("relation") or "peer"
+    if relation not in ai.EXPRESSION_RELATIONS:
+        raise ApiError(400, "unknown relation")
+    cfg = ai.config()
+    if not cfg["enabled"]:
+        message = "尚未配置 AI 服务" if req.lang == "zh" else "AI service is not configured"
+        raise ApiError(503, message)
+    with limits.analysis_slot(req.user["id"]):
+        try:
+            result = ai.interpret_message(text, source_lang=source_lang, target_lang=target_lang, relation=relation)
+        except ai.AIError as exc:
+            message = _redact(str(exc))[:200] or ("AI 暂时不可用" if req.lang == "zh" else "AI is temporarily unavailable")
+            raise ApiError(502, message) from exc
+    return result
+
+
+@router.route("POST", "/api/ai/selftest")
+def ai_selftest(req: Request):
+    """部署/演示用的自检：一次最小模型调用，返回耗时与模型名。
+
+    和其他模型调用共用同一套并发与冷却限制，避免它变成免费打模型的通道。
+    """
+    cfg = ai.config()
+    if not cfg["enabled"]:
+        message = "尚未配置 AI 服务" if req.lang == "zh" else "AI service is not configured"
+        raise ApiError(503, message)
+    with limits.analysis_slot(req.user["id"]):
+        try:
+            return ai.selftest()
+        except ai.AIError as exc:
+            message = _redact(str(exc))[:200] or ("AI 暂时不可用" if req.lang == "zh" else "AI is temporarily unavailable")
+            raise ApiError(502, message) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -1085,6 +1144,7 @@ def _account_payload(user: dict) -> dict:
         "pro": user["plan"] == "pro",
         "region": user["region"],
         "lang": user["lang"],
+        "lang_set": bool(user.get("lang_set")),
         "entries": total,
         "note": {
             "zh": "Pro 用兑换码开通，没有订阅、也不会扣款。",
@@ -1093,13 +1153,30 @@ def _account_payload(user: dict) -> dict:
     }
 
 
-def _session_response(user: dict) -> Response:
+def _session_response(user: dict, req: Request | None = None) -> Response:
+    """登录成功：网页拿到 Cookie，壳内另外拿到 Bearer token。
+
+    token 只回给请求方，不写进日志；网页端继续用 HttpOnly Cookie（JS 读不到，
+    XSS 也偷不走），只有壳内才把 token 放进安全存储。
+    """
     token, _ = auth.create_session(user["id"])
-    resp = Response(payload={"account": _account_payload(user)})
+    payload = {"account": _account_payload(user)}
+    if req is not None and _wants_token(req):
+        payload["token"] = token
+        payload["token_type"] = "Bearer"
+        payload["expires_in"] = auth.SESSION_DAYS * 86400
+    resp = Response(payload=payload)
     resp.headers["Set-Cookie"] = (
         f"{auth.COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={auth.SESSION_DAYS * 86400}"
     )
     return resp
+
+
+def _wants_token(req: Request) -> bool:
+    """只有显式声明的客户端才发 token，避免网页端把会话凭据交给 JS。"""
+    if _bearer(req):
+        return True
+    return (req.headers.get("x-tether-token-auth") or "").strip().lower() in ("1", "true", "bearer")
 
 
 @router.route("POST", "/api/auth/register")
@@ -1107,7 +1184,7 @@ def register(req: Request):
     limits.registration_attempt(req.client_ip)
     body = req.json()
     user = auth.create_user(_clean_text(body.get("username"), 24), _clean_password(body.get("password")))
-    return _session_response(user)
+    return _session_response(user, req)
 
 
 @router.route("POST", "/api/auth/login")
@@ -1116,13 +1193,15 @@ def login(req: Request):
     username = _clean_text(body.get("username"), 24)
     password = _clean_password(body.get("password"))
     user = auth.authenticate_limited(req.client_ip, username, password)
-    return _session_response(user)
+    return _session_response(user, req)
 
 
 @router.route("POST", "/api/auth/logout")
 def logout(req: Request):
-    if req.sid:
-        auth.delete_session(req.sid)
+    # 壳内用 Bearer、网页用 Cookie，退出一律销毁当前这条会话。
+    for token in (req.token, req.sid):
+        if token:
+            auth.delete_session(token)
     resp = Response(payload={"ok": True})
     resp.headers["Set-Cookie"] = f"{auth.COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
     return resp
@@ -1145,7 +1224,7 @@ def change_password(req: Request):
     auth.authenticate_limited(req.client_ip, req.user["username"], _clean_password(old))
     auth.set_password(req.user["id"], new)
     # 改密码会踢掉所有会话，这里立刻补一个新的，免得自己被登出
-    return _session_response(req.user)
+    return _session_response(req.user, req)
 
 
 @router.route("POST", "/api/account/redeem")
@@ -1341,12 +1420,58 @@ def _cookie(req: Request, name: str) -> str:
     return ""
 
 
+def _bearer(req: Request) -> str:
+    """原生壳用 Bearer token，网页继续用 Cookie。
+
+    两种凭据走同一张 sessions 表：token 就是会话主键，所以退出、改密码、
+    过期清理对两边同时生效，不需要第二套状态。
+    """
+    raw = (req.headers.get("authorization") or "").strip()
+    if not raw:
+        return ""
+    scheme, _, value = raw.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    token = value.strip()
+    # token 是 token_urlsafe(32)：只接受这个长度区间，避免把垃圾数据当会话去查。
+    return token if 20 <= len(token) <= 128 else ""
+
+
+# 限流是 AI 功能最常见的可见失败：文案要跟着界面语言走，并明确还要等多久。
+LIMIT_MESSAGES = {
+    "zh": {
+        "in_flight": "这个账号已经有一次分析在进行，等它结束再试。",
+        "cooldown": "刚调用过模型，请再等 {s} 秒。",
+        "capacity": "当前同时在跑的分析太多，请 {s} 秒后再试。",
+        "ip_window": "尝试次数太多，请 {s} 秒后再试。",
+        "global_window": "这一分钟注册请求过多，请 {s} 秒后再试。",
+        "generic": "请求过于频繁，请 {s} 秒后再试。",
+    },
+    "en": {
+        "in_flight": "An analysis is already running for this account. Try again when it finishes.",
+        "cooldown": "The model was just called. Try again in {s} seconds.",
+        "capacity": "Too many analyses are running right now. Try again in {s} seconds.",
+        "ip_window": "Too many attempts. Try again in {s} seconds.",
+        "global_window": "Too many sign-ups this minute. Try again in {s} seconds.",
+        "generic": "Too many requests. Try again in {s} seconds.",
+    },
+}
+
+
+def _limit_message(req: Request, exc: limits.LimitError) -> str:
+    table = LIMIT_MESSAGES.get(getattr(req, "lang", "zh"), LIMIT_MESSAGES["zh"])
+    template = table.get(exc.reason or "generic", table["generic"])
+    return template.replace("{s}", str(exc.retry_after))
+
+
 def dispatch(req: Request) -> Response:
     try:
         handler, params = router.match(req.method, req.path)
         # 先把会话解出来：公开接口也想知道「谁在访问」（比如 meta 要回该用户的 plan）
+        # 原生壳无法可靠携带跨站 Cookie，所以优先用 Authorization: Bearer；网页仍走 Cookie。
+        req.token = _bearer(req)
         req.sid = _cookie(req, auth.COOKIE_NAME)
-        req.user = auth.user_by_token(req.sid)
+        req.user = auth.user_by_token(req.token or req.sid)
 
         public = req.path in PUBLIC_PATHS or req.path.startswith("/api/auth/")
         if not public and not req.user:
@@ -1360,7 +1485,7 @@ def dispatch(req: Request) -> Response:
     except ApiError as exc:
         return Response(status=exc.status, payload={"error": exc.message})
     except limits.LimitError as exc:
-        return Response(status=429, payload={"error": str(exc)}, headers={"Retry-After": str(exc.retry_after)})
+        return Response(status=429, payload={"error": _limit_message(req, exc)}, headers={"Retry-After": str(exc.retry_after)})
     except auth.AuthError as exc:
         headers = {"Retry-After": str(exc.retry_after)} if hasattr(exc, "retry_after") else {}
         return Response(status=exc.status, payload={"error": exc.message}, headers=headers)

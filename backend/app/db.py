@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS users (
     plan       TEXT NOT NULL DEFAULT 'free',
     region     TEXT NOT NULL DEFAULT 'CN',
     lang       TEXT NOT NULL DEFAULT 'zh',
+    lang_set   INTEGER NOT NULL DEFAULT 0,
     data_revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -186,6 +187,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_rank ON entries(user_id, COALESCE(severity, 0) DESC, occurred_at DESC, id DESC)")
     if "data_revision" not in _columns(conn, "users"):
         conn.execute("ALTER TABLE users ADD COLUMN data_revision INTEGER NOT NULL DEFAULT 0")
+    # lang_set 区分「账号默认语言」和「用户自己选过」：改过的才覆盖浏览器语言。
+    if "lang_set" not in _columns(conn, "users"):
+        conn.execute("ALTER TABLE users ADD COLUMN lang_set INTEGER NOT NULL DEFAULT 0")
     if "user_id" not in _columns(conn, "ai_cache"):
         conn.execute("ALTER TABLE ai_cache ADD COLUMN user_id INTEGER")
     # Legacy cache keys cannot be mapped back to an owner. Keep the source records.

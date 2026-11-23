@@ -1,6 +1,6 @@
 /* 智心元流 — 前端主逻辑（无依赖、无构建） */
 
-import { api, setApiLang, tzOffset } from "./api.js";
+import { api, setApiLang, tzOffset, isNativeShell, setAuthToken, restoreAuthToken } from "./api.js";
 import { t, setLang, getLang, applyStaticText } from "./i18n.js";
 import { createPracticeController } from "./practices.js";
 import { createExpressionController } from "./expression.js";
@@ -1192,9 +1192,51 @@ function viewInsights() {
 
 /* ---------------------------------------------------------------- 我的 */
 
+/* 装到主屏：这是产品走到手机上的第一步，浏览器只是调试环境。
+   Android/桌面 Chrome 会发 beforeinstallprompt，可以调起系统安装框；
+   iOS Safari 没有这个事件，只能告诉用户「分享 → 添加到主屏」。
+   已装到主屏时（display-mode: standalone）整张卡不显示。 */
+let deferredInstall = null;
+
+function isStandalone() {
+  try {
+    return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  } catch {
+    return false;
+  }
+}
+
+function isIosSafari() {
+  try {
+    const ua = navigator.userAgent || "";
+    return /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  } catch {
+    return false;
+  }
+}
+
+function installState() {
+  if (isStandalone()) return { show: false };
+  return { show: true, ios: isIosSafari(), canPrompt: Boolean(deferredInstall) };
+}
+
+function installCard() {
+  const install = installState();
+  if (!install.show) return "";
+  return `<div class="card install-card stack gap-8" id="install-card">
+    <div class="row-between">
+      <h2 class="eyebrow">${t("me.install_title")}</h2>
+      <span class="tiny">${t("me.install_badge")}</span>
+    </div>
+    <p class="tiny">${install.ios ? t("me.install_ios") : t("me.install_body")}</p>
+    ${install.ios ? "" : `<button class="btn soft sm block" data-act="install-app" style="align-self:flex-start">${t("me.install_action")}</button>`}
+  </div>`;
+}
+
 function viewMe() {
   const acc = state.account || { pro: false, entries: 0, user: {} };
   const regions = (state.meta && state.meta.regions) || [];
+  const ai = (state.meta && state.meta.ai) || { enabled: false };
   const username = (acc.user && acc.user.username) || "";
   return `<div class="stack gap-16">
     <h1 class="display sm">${t("me.title")}</h1>
@@ -1221,6 +1263,19 @@ function viewMe() {
       ${acc.pro ? "" : `<button class="btn block" data-act="paywall">${t("me.redeem")}</button>`}
     </div>
 
+    <div class="card stack gap-8" id="ai-card">
+      <div class="row-between">
+        <h2 class="eyebrow">${t("ai.card_title")}</h2>
+        <span class="tiny" style="color:${ai.enabled ? "var(--moss)" : "var(--brick)"}">
+          ${ai.enabled ? t("ai.connected", { model: ai.model || "" }) : t("ai.disconnected")}
+        </span>
+      </div>
+      <p class="tiny">${ai.enabled ? t("ai.card_body", { model: ai.model || "", provider: ai.provider || t("ai.provider_custom") }) : t("ai.card_hint")}</p>
+      ${ai.enabled ? `<button class="btn soft sm block" data-act="ai-selftest" style="align-self:flex-start">${t("ai.test")}</button>` : ""}
+    </div>
+
+    ${installCard()}
+
     <div class="card stack gap-8">
       <h2 class="eyebrow">${t("me.settings")}</h2>
       <div class="list-row">
@@ -1241,7 +1296,7 @@ function viewMe() {
 .join("")}
         </div>
       </div>
-      <div class="list-row">
+      ${voiceSupport() ? `<div class="list-row">
         <div><div class="label">${t("me.voice")}</div></div>
         <div class="chip-row">
           ${VOICE_LANGS.map(
@@ -1250,7 +1305,7 @@ function viewMe() {
                 data-act="set-voice" data-lang="${v.key}">${v.label}</button>`
           ).join("")}
         </div>
-      </div>
+      </div>` : ""}
       <div class="list-row">
         <div><div class="label">${t("me.region")}</div></div>
         <select data-act="region" aria-label="${t("me.region")}" style="width:auto;min-width:128px">
@@ -1765,6 +1820,7 @@ function crisisBlock() {
     ${crisisLines(iv.crisis.lines)}
     ${emergencyLinks(iv.crisis)}
     <p class="tiny" style="margin-top:10px">${esc(iv.crisis.free_note)}</p>
+    ${iv.crisis.verified_at ? `<p class="tiny">${esc(t("crisis.verified", { date: iv.crisis.verified_at }))}</p>` : ""}
     <button class="btn ghost sm" data-act="open-crisis" style="margin-top:12px;width:100%">${t("iv.crisis_cta")}</button>
   </div>`;
 }
@@ -1880,9 +1936,7 @@ async function openEditSheet(entryId, fromIntervention = false) {
       <div class="input-wrap">
         <span class="char-count" data-count-for="cause">${cause.length}/500</span>
         <textarea data-input="cause" ${fromIntervention ? "data-autofocus" : ""} placeholder="${t("note.placeholder")}" maxlength="500">${esc(cause)}</textarea>
-        <button class="mic-btn" data-act="mic" aria-label="${t("note.voice")}">
-          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="9.2" y="3" width="5.6" height="10.5" rx="2.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-        </button>
+        ${micButton()}
       </div>
       <p class="tiny">${t("note.sub")}</p>
       <div class="chip-row" style="margin-top:2px">
@@ -2007,14 +2061,80 @@ async function openCrisis() {
 
 let recognition = null;
 
-function startVoice() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    toast(t("note.voice_off"));
-    return;
+/* 语音输入能力检测：浏览器引擎的原生接口，或壳注入的原生桥。
+   WebView（Capacitor/Android/iOS）里 webkitSpeechRecognition 通常不存在，
+   即使存在也常常静默失败——所以壳内默认视为不可用，除非显式注入了桥。
+
+   结论只有两种用法：支持就显示麦克风按钮，不支持就完全不渲染，
+   不留一个点了没反应的死按钮。 */
+function voiceSupport() {
+  try {
+    if (isNativeShell()) {
+      const bridge = window.__TETHER_SPEECH__;
+      return Boolean(bridge && typeof bridge.start === "function");
+    }
+    return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+  } catch {
+    return false;
   }
+}
+
+function micButton() {
+  if (!voiceSupport()) return "";
+  return `<button class="mic-btn" data-act="mic" aria-label="${t("note.voice")}">
+    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="9.2" y="3" width="5.6" height="10.5" rx="2.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+  </button>`;
+}
+
+function insertDictation(said) {
+  const textarea = overlay.querySelector('[data-input="cause"]');
+  const value = String(said || "").trim();
+  if (!textarea || !value) return;
+  textarea.value = `${textarea.value ? textarea.value + " " : ""}${value}`.slice(0, 500);
+  syncCharCount();
+}
+
+function startVoice() {
   const textarea = overlay.querySelector('[data-input="cause"]');
   const btn = overlay.querySelector(".mic-btn");
+
+  // 壳内走原生桥：WebView 没有可用的 SpeechRecognition。
+  if (isNativeShell()) {
+    const bridge = window.__TETHER_SPEECH__;
+    if (!bridge || typeof bridge.start !== "function") {
+      toast(t("note.voice_unsupported"));
+      return;
+    }
+    if (btn && btn.classList.contains("rec")) {
+      try { bridge.stop?.(); } catch { /* 已经停了 */ }
+      btn.classList.remove("rec");
+      return;
+    }
+    try {
+      btn?.classList.add("rec");
+      bridge.start(
+        (said) => {
+          insertDictation(said);
+          btn?.classList.remove("rec");
+        },
+        () => {
+          btn?.classList.remove("rec");
+          toast(t("note.voice_failed"));
+        },
+        voice.lang || (getLang() === "zh" ? "zh-CN" : "en-US"),
+      );
+    } catch {
+      btn?.classList.remove("rec");
+      toast(t("note.voice_failed"));
+    }
+    return;
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    toast(t("note.voice_unsupported"));
+    return;
+  }
   if (recognition) {
     // 再点一次就停：录音状态必须能退出
     try {
@@ -2035,22 +2155,27 @@ function startVoice() {
      没手动选过就跟着界面语言走。 */
   recognition.lang = voice.lang || (getLang() === "zh" ? "zh-CN" : "en-US");
   recognition.onresult = (event) => {
-    const said = Array.from(event.results)
-      .map((r) => r[0].transcript)
-      .join(" ")
-      .trim();
-    if (textarea && said) {
-      textarea.value = `${textarea.value ? textarea.value + " " : ""}${said}`.slice(0, 500);
-      syncCharCount();
-    }
+    insertDictation(
+      Array.from(event.results)
+        .map((r) => r[0].transcript)
+        .join(" "),
+    );
   };
   recognition.onend = () => btn && btn.classList.remove("rec");
-  recognition.onerror = () => btn && btn.classList.remove("rec");
+  /* 权限被拒、系统没有识别服务、网络识别失败：各给一句能看懂的话，
+     否则用户只看到按钮闪一下，以为是自己说错了。 */
+  recognition.onerror = (event) => {
+    btn && btn.classList.remove("rec");
+    const code = event && event.error;
+    if (code === "not-allowed" || code === "service-not-allowed") toast(t("note.voice_denied"));
+    else if (code === "no-speech") toast(t("note.voice_nospeech"));
+    else toast(t("note.voice_failed"));
+  };
   try {
     recognition.start();
     if (btn) btn.classList.add("rec");
   } catch {
-    toast(t("note.voice_off"));
+    toast(t("note.voice_failed"));
   }
 }
 
@@ -2200,6 +2325,8 @@ const expression = createExpressionController({
 const crossing = createCrossingController({
   api, t, esc, getLang, overlay, open: openOverlay, close: closeOverlay, toast,
   getAccount: () => state.account,
+  getAI: () => (state.meta ? state.meta.ai : null) || {},
+  getLanguages: () => (state.meta && state.meta.languages) || [],
 });
 
 const ACTIONS = {
@@ -2286,6 +2413,33 @@ const ACTIONS = {
   "change-password": () => openPasswordSheet(),
   "password-submit": () => doChangePassword(),
   reanalyze: () => runAnalysis({ force: true }),
+  "ai-selftest": async (node) => {
+    const label = node.textContent;
+    node.disabled = true;
+    node.textContent = t("ai.testing");
+    try {
+      const result = await api.aiSelftest();
+      toast(t("ai.test_ok", { model: result.model, ms: result.ms }));
+    } catch (err) {
+      toast(t("ai.test_failed", { message: err.message }));
+    } finally {
+      node.disabled = false;
+      node.textContent = label;
+    }
+  },
+  "install-app": async () => {
+    if (!deferredInstall) { toast(t("me.install_unavailable")); return; }
+    try {
+      deferredInstall.prompt();
+      const choice = await deferredInstall.userChoice;
+      if (choice && choice.outcome === "accepted") toast(t("me.install_accepted"));
+    } catch {
+      toast(t("me.install_unavailable"));
+    } finally {
+      deferredInstall = null;
+      render();
+    }
+  },
   "confirm-ok": () => settleConfirm(true),
   "confirm-cancel": () => settleConfirm(false),
   lang: (node) => switchLang(node.dataset.lang),
@@ -2726,8 +2880,9 @@ document.addEventListener("submit", async (event) => {
   button.disabled = true;
   button.textContent = t("auth.logging_in");
   try {
-    if (mode === "login") await api.login(username, password);
-    else await api.register(username, password);
+    const session = mode === "login" ? await api.login(username, password) : await api.register(username, password);
+    // 壳内：服务端把会话 token 放在响应体里，存下来给后续请求用；网页端没有这个字段。
+    if (session && session.token) setAuthToken(session.token);
     expression.reset();
     location.reload();
   } catch (err) {
@@ -2741,6 +2896,8 @@ document.addEventListener("submit", async (event) => {
 window.addEventListener("tether:unauthorized", () => {
   if (sessionExpired) return;
   sessionExpired = true;
+  // 壳内 token 也已经失效，清掉，避免下次启动带着废 token 再走一遍 401。
+  setAuthToken("");
   api.cancelPending();
   expression.suspend();
   practice.reset();
@@ -2769,6 +2926,7 @@ async function doLogout() {
   try {
     await api.logout();
     api.cancelPending();
+    setAuthToken("");
     practice.reset();
     expression.reset();
     location.reload();
@@ -2869,7 +3027,29 @@ async function doChangePassword() {
 
 /* --------------------------------------------------------------- 启动 */
 
+/* 语言优先级：本机选过 > 账号里明确设过 > 浏览器语言 > 中文。
+   抽成纯函数，测试和 boot 用同一套判断。 */
+function browserLangTag() {
+  try {
+    return (navigator.language || (navigator.languages && navigator.languages[0]) || "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeLang(tag) {
+  return String(tag || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function pickInitialLang(stored, browserTag, metaLang, metaLangSet) {
+  if (stored === "zh" || stored === "en") return stored;
+  if (metaLangSet && (metaLang === "zh" || metaLang === "en")) return metaLang;
+  return normalizeLang(browserTag);
+}
+
 async function boot() {
+  // 壳内：先把上次的 token 放回去，bootstrap 才能恢复登录态。
+  if (isNativeShell()) restoreAuthToken();
   let storedLang = null;
   try {
     storedLang = localStorage.getItem("tether.lang");
@@ -2878,7 +3058,8 @@ async function boot() {
   } catch {
     /* 无痕模式：用默认值 */
   }
-  const initial = storedLang === "en" || storedLang === "zh" ? storedLang : "zh";
+  /* 优先级：本机选过 > 账号里明确设过 > 浏览器语言 > 中文。 */
+  const initial = pickInitialLang(storedLang, browserLangTag(), null, false);
   setLang(initial);
   setApiLang(initial);
   applyStaticText();
@@ -2897,9 +3078,10 @@ async function boot() {
     state.total = payload.home.total;
     $('#plan-chip').hidden = !state.account.pro;
     $('#plan-chip').textContent = state.account.pro ? 'PRO' : '';
-    if (!storedLang && state.meta.lang !== initial) {
-      setLang(state.meta.lang);
-      setApiLang(state.meta.lang);
+    const effective = pickInitialLang(storedLang, browserLangTag(), state.meta.lang, state.meta.lang_set);
+    if (effective !== initial) {
+      setLang(effective);
+      setApiLang(effective);
       applyStaticText();
       applyTheme();
       await loadMeta();
@@ -2917,6 +3099,18 @@ async function boot() {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) practice.pause();
   if (!document.hidden && state.account) ensureViewData(state.view, { force: true, silent: true });
+});
+
+/* 装到主屏的两个信号：Android/Chrome 发 beforeinstallprompt（可以调起系统框），
+   装好后发 appinstalled（把入口卡收掉）。iOS 没有前者，卡片改成操作说明。 */
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstall = event;
+  if (state.view === "me") render();
+});
+window.addEventListener("appinstalled", () => {
+  deferredInstall = null;
+  if (state.view === "me") render();
 });
 window.addEventListener("online", () => {
   if (!document.hidden && state.account) ensureViewData(state.view, { force: true, silent: true });

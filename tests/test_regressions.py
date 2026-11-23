@@ -1,5 +1,6 @@
 """Run with python -m unittest discover -s tests -v. No real database or model calls."""
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -7,11 +8,15 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app import ai, api, auth, content, db, insights, limits
+
+# setUp patches ai.config for the whole suite; keep the real parser for the config test.
+_real_ai_config = ai.config
 
 
 class Regressions(unittest.TestCase):
@@ -245,6 +250,233 @@ class Regressions(unittest.TestCase):
         self.assertEqual(validated["alternatives"][1]["text"], "Any chance the draft could slip to Wednesday?")
         self.assertEqual(len(validated["cultural_notes"]), 2)
         self.assertEqual(validated["target_lang"], "en")
+
+    def test_expression_interpret_requires_login_and_validates_payload(self):
+        body = {"text": "Could you be more careful next time?", "source_lang": "en", "target_lang": "zh"}
+        unauthenticated = api.Request("POST", "/api/expression/interpret", {}, json.dumps(body).encode(), {})
+        self.assertEqual(api.dispatch(unauthenticated).status, 401)
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}):
+            cases = [
+                {"text": ""},
+                {"text": "x" * 501},
+                {**body, "source_lang": "fr"},
+                {**body, "target_lang": "de"},
+                {**body, "relation": "boss"},
+            ]
+            for item in cases:
+                result = self.request("POST", "/api/expression/interpret", item)
+                self.assertIn(result.status, (400, 422), item)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM entries"), 0)
+
+    def test_expression_interpret_is_a_reading_and_never_persisted(self):
+        body = {"text": "Could you be more careful next time?", "source_lang": "en", "target_lang": "zh", "relation": "manager"}
+        result = {"meaning": "对方希望你下次更注意", "tone": "tense", "subtext": "可能对上次的事还没放下（不确定）",
+                  "replies": [{"tone": "polite", "text": "明白，下次我会先确认。"}], "cultural_notes": ["这句话在英语里偏直接"],
+                  "target_lang": "zh", "safety": "ok"}
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
+                patch.object(ai, "interpret_message", return_value=result) as interpret:
+            response = self.request("POST", "/api/expression/interpret", body)
+        self.assertEqual(response.status, 200, response.payload)
+        self.assertEqual(response.payload, result)
+        interpret.assert_called_once_with(body["text"], source_lang="en", target_lang="zh", relation="manager")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM entries"), 0)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM ai_cache"), 0)
+
+    def test_expression_interpret_returns_service_unavailable_when_ai_is_disabled(self):
+        body = {"text": "Could you be more careful next time?", "source_lang": "en", "target_lang": "zh"}
+        with patch.object(ai, "interpret_message") as interpret:
+            response = self.request("POST", "/api/expression/interpret", body)
+        self.assertEqual(response.status, 503)
+        interpret.assert_not_called()
+
+    def test_interpretation_output_separates_guesswork_and_rejects_clinical_terms(self):
+        raw = {
+            "meaning": "对方在提一个具体的请求",
+            "tone": "weird",
+            "subtext": "可能有点不满（不确定）",
+            "replies": [
+                {"tone": "polite", "text": "明白，下次我先确认。"},
+                {"tone": "rude", "text": "drop this"},
+                {"tone": "direct", "text": "x" * 601},
+                {"tone": "close", "text": "收到，下次注意。"},
+                {"tone": "polite", "text": "我明白。"},
+            ],
+            "cultural_notes": ["a", "b", "c"],
+        }
+        validated = ai._validate_interpretation(raw, "zh")
+        self.assertEqual(validated["tone"], "ambiguous")
+        self.assertEqual([reply["tone"] for reply in validated["replies"]], ["polite", "close"])
+        self.assertEqual(len(validated["cultural_notes"]), 2)
+        self.assertEqual(validated["target_lang"], "zh")
+        for broken in (
+            {**raw, "subtext": "这可能是抑郁症的前兆"},
+            {**raw, "replies": [{"tone": "polite", "text": "建议你去做个诊断"}]},
+            {**raw, "meaning": ""},
+        ):
+            with self.assertRaises(ai.AIError):
+                ai._validate_interpretation(broken, "zh")
+
+    def test_ai_config_exposes_provider_and_fallback_without_secrets(self):
+        env = {
+            "TETHER_AI_API_KEY": "sk-test-value", "TETHER_AI_BASE_URL": "https://api.deepseek.com/v1",
+            "TETHER_AI_MODEL": "deepseek-flash", "TETHER_AI_FALLBACK_BASE_URL": "http://127.0.0.1:11434/v1",
+            "TETHER_AI_FALLBACK_MODEL": "qwen3",
+        }
+        with patch.dict(os.environ, env, clear=False), patch.object(ai, "_env_loaded", True):
+            cfg = _real_ai_config()
+            with patch.object(ai, "config", side_effect=lambda: cfg):
+                public = ai.public_config()
+            chain = ai.endpoints(cfg)
+        self.assertEqual(public["provider"], "deepseek")
+        self.assertTrue(public["fallback"])
+        self.assertNotIn("api_key", public)
+        self.assertNotIn("base_url", public)
+        self.assertEqual(len(chain), 2)
+        self.assertEqual(chain[1]["provider"], "local")
+        self.assertEqual(chain[1]["model"], "qwen3")
+
+    def test_ai_call_falls_back_to_the_secondary_endpoint(self):
+        cfg = {
+            "enabled": True, "api_key": "primary-key", "base_url": "https://primary.invalid/v1",
+            "model": "primary-model", "provider": "custom", "effort": "high", "timeout": 5,
+            "fallback": {"base_url": "https://backup.invalid/v1", "model": "backup-model", "api_key": "backup-key"},
+        }
+        seen = []
+
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def read(self):
+                return b'{"choices":[{"message":{"content":"{\\"ok\\": true}"},"finish_reason":"stop"}]}'
+
+        def fake_open(request, timeout=None):
+            seen.append((request.full_url, request.headers.get("Authorization")))
+            if "primary.invalid" in request.full_url:
+                raise urllib.error.URLError("primary unreachable")
+            return Reply()
+
+        with patch.object(ai.urllib.request, "urlopen", side_effect=fake_open), \
+                patch.object(ai.time, "sleep", lambda *_: None):
+            content, finish = ai._post(cfg, [{"role": "user", "content": "hi"}], 64)
+        self.assertEqual(finish, "stop")
+        self.assertIn("ok", content)
+        self.assertIn("backup.invalid", seen[-1][0])
+        self.assertEqual(seen[-1][1], "Bearer backup-key")
+
+    def test_ai_selftest_is_gated_and_rate_limited(self):
+        with patch.object(ai, "config", return_value={"enabled": False}):
+            self.assertEqual(self.request("POST", "/api/ai/selftest").status, 503)
+        result = {"ok": True, "ms": 12, "model": "test-model", "provider": "custom", "fallback": False}
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test-model"}), \
+                patch.object(ai, "selftest", return_value=result) as probe:
+            response = self.request("POST", "/api/ai/selftest")
+            throttled = self.request("POST", "/api/ai/selftest")
+        self.assertEqual(response.status, 200, response.payload)
+        self.assertEqual(response.payload, result)
+        probe.assert_called_once_with()
+        self.assertEqual(throttled.status, 429)
+
+    def test_rate_limit_messages_follow_the_interface_language(self):
+        result = {"ok": True, "ms": 1, "model": "test-model", "provider": "custom", "fallback": False}
+        with patch.object(ai, "config", return_value={"enabled": True, "model": "test-model"}), \
+                patch.object(ai, "selftest", return_value=result):
+            first = self.request("POST", "/api/ai/selftest")
+            english = self.request("POST", "/api/ai/selftest", query={"tz_offset": ["480"], "lang": ["en"]})
+            chinese = self.request("POST", "/api/ai/selftest", query={"tz_offset": ["480"], "lang": ["zh"]})
+        self.assertEqual(first.status, 200)
+        self.assertEqual(english.status, 429)
+        self.assertIn("model was just called", english.payload["error"])
+        self.assertIn("秒", chinese.payload["error"])
+        self.assertIn("Retry-After", english.headers)
+
+    def test_interface_language_preference_is_stored_separately_from_the_default(self):
+        meta = self.request("GET", "/api/meta").payload
+        self.assertFalse(meta["lang_set"])  # 新账号只是默认值，不该覆盖浏览器语言
+        self.assertEqual(meta["lang"], "zh")
+        updated = self.request("PATCH", "/api/account/settings", {"lang": "en"})
+        self.assertEqual(updated.status, 200)
+        self.assertTrue(updated.payload["lang_set"])
+        self.assertEqual(updated.payload["lang"], "en")
+        meta = self.request("GET", "/api/meta").payload
+        self.assertTrue(meta["lang_set"])
+        self.assertEqual(meta["lang"], "en")
+
+    def test_legacy_users_gain_lang_set_without_losing_sessions(self):
+        conn = db.connect()
+        conn.execute("ALTER TABLE users DROP COLUMN lang_set")
+        conn.commit()
+        conn.close()
+        db.init_db()
+        db.init_db()
+        user = auth.get_user(self.users[0]["id"])
+        self.assertFalse(user["lang_set"])
+        self.assertEqual(self.request("GET", "/api/bootstrap").payload["account"]["lang_set"], False)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM sessions"), 2)
+
+    def test_crisis_resources_carry_provenance_and_every_region_is_actionable(self):
+        payload = self.request("GET", "/api/crisis").payload
+        self.assertEqual(payload["verified_at"], "2026-11-22")
+        self.assertTrue(payload["source"].startswith("https://"))
+        self.assertEqual(set(content.CRISIS_SOURCES), set(content.REGION_KEYS))
+        for region, data in content.CRISIS.items():
+            self.assertTrue(data["lines"], region)
+            for line in data["lines"]:
+                self.assertTrue(line["name"], region)
+                self.assertTrue(line["contact"]["zh"] and line["contact"]["en"], region)
+                # 每条资源要么能拨号，要么有链接，否则等于没给
+                self.assertTrue(line.get("number") or line.get("url"), f"{region}:{line['name']}")
+
+    def test_bearer_token_login_works_where_cookies_cannot(self):
+        """壳内无法可靠携带跨站 Cookie，用 Authorization: Bearer 走同一张会话表。"""
+        response = self.request(
+            "POST", "/api/auth/login",
+            {"username": self.users[0]["username"], "password": "Test-only!SeCrEt42"},
+        )
+        # 网页端：只有 Cookie，响应体里不出现 token
+        self.assertNotIn("token", response.payload)
+        self.assertIn("Set-Cookie", response.headers)
+
+        native = api.Request(
+            "POST", "/api/auth/login", {},
+            json.dumps({"username": self.users[0]["username"], "password": "Test-only!SeCrEt42"}).encode(),
+            {"x-tether-token-auth": "bearer"},
+        )
+        native.client_ip = "test-client"
+        session = api.dispatch(native)
+        self.assertEqual(session.status, 200, session.payload)
+        token = session.payload["token"]
+        self.assertEqual(session.payload["token_type"], "Bearer")
+        self.assertGreater(session.payload["expires_in"], 0)
+        auth._login_fails.clear()
+
+        # 只带 Bearer、不带 Cookie，也能拿到自己的数据
+        req = api.Request("GET", "/api/account", {"tz_offset": ["480"]}, b"", {"authorization": f"Bearer {token}"})
+        req.client_ip = "test-client"
+        result = api.dispatch(req)
+        self.assertEqual(result.status, 200, result.payload)
+        self.assertEqual(result.payload["user"]["username"], self.users[0]["username"])
+
+    def test_bearer_and_cookie_are_both_revoked_by_logout(self):
+        token = auth.create_session(self.users[0]["id"])[0]
+        req = api.Request("POST", "/api/auth/logout", {}, b"", {"authorization": f"Bearer {token}"})
+        req.client_ip = "test-client"
+        self.assertEqual(api.dispatch(req).status, 200)
+        after = api.Request("GET", "/api/account", {"tz_offset": ["480"]}, b"", {"authorization": f"Bearer {token}"})
+        after.client_ip = "test-client"
+        self.assertEqual(api.dispatch(after).status, 401)
+        # 网页那条 Cookie 会话不受影响
+        self.assertEqual(self.request("GET", "/api/account").status, 200)
+
+    def test_invalid_or_malformed_bearer_is_treated_as_anonymous(self):
+        cases = ["", "Bearer", "Bearer ", "Basic abcdefghijklmnopqrstuvwx", "Bearer short", f"Bearer {'x' * 200}"]
+        for header in cases:
+            request = api.Request("GET", "/api/account", {"tz_offset": ["480"]}, b"", {"authorization": header})
+            request.client_ip = "test-client"
+            self.assertEqual(api.dispatch(request).status, 401, header)
+        # 合法格式但会话不存在
+        request = api.Request("GET", "/api/account", {}, b"", {"authorization": "Bearer " + "a" * 43})
+        request.client_ip = "test-client"
+        self.assertEqual(api.dispatch(request).status, 401)
 
     def test_legacy_cache_migration_preserves_records(self):
         self.request("POST", "/api/entries", self.entry())

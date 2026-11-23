@@ -22,14 +22,15 @@ const deferred = () => {
 };
 const response = (body, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
 
-function client(fetch) {
+function client(fetch, { href = "https://test.invalid/qienty/", storage = null, inject = null } = {}) {
   const timers = new Map();
   let nextTimer = 0;
   const events = [];
   const context = vm.createContext({
     URL, URLSearchParams, Date, AbortController, TypeError,
-    location: { href: "https://test.invalid/qienty/" }, fetch,
-    window: { dispatchEvent: (event) => events.push(event.type) },
+    location: { href }, fetch,
+    window: { dispatchEvent: (event) => events.push(event.type), ...(inject === null ? {} : { __TETHER_API_BASE__: inject }) },
+    localStorage: storage || { getItem: () => null, setItem() {}, removeItem() {} },
     CustomEvent: class { constructor(type) { this.type = type; } },
     setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; },
     clearTimeout: (id) => timers.delete(id),
@@ -65,6 +66,8 @@ function app(overrides = {}) {
     weeklyCard: async () => { calls.push("weekly"); return { days: 7, since: today, until: today,
       entries: { count: 0, severe: 0, days: 0, top_emotion: null }, previous: { count: 0, severe: 0 },
       practices: { completed: 0, paired: 0, before_average: null, after_average: null, drops: 0, better: 0, same: 0, worse: 0 } }; },
+    interpretMessage: async () => { calls.push("interpret"); return { meaning: "fixture", tone: "neutral", subtext: "", replies: [], cultural_notes: [] }; },
+    aiSelftest: async () => { calls.push("selftest"); return { ok: true, ms: 5, model: "test-model", provider: "custom", fallback: false }; },
     stats: async () => { calls.push("stats"); return { entries: 8 }; },
     cancelPending: () => calls.push("cancel"), logout: async () => {}, ...overrides,
   };
@@ -80,6 +83,7 @@ function app(overrides = {}) {
     history: { pushState() {}, back() {}, replaceState() {} },
     setTimeout: () => 1, clearTimeout() {}, setInterval() {}, clearInterval() {}, requestAnimationFrame: () => 1,
     t: (key) => key, getLang: () => "zh", tzOffset: () => 480, messages,
+    isNativeShell: () => false, setAuthToken: () => {}, restoreAuthToken: () => "",
   });
   vm.runInContext(plain(expressionSource) + '\n' + plain(practiceSource) + '\n' + plain(crossingSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
     globalThis.renders = 0;
@@ -626,6 +630,210 @@ test("Cross-language result exposes copy and an alternative tone", async () => {
   assert.ok(html.includes("data-act=\"c-copy\""));
   assert.ok(html.includes("No, not this week."));
   assert.ok(html.includes("先给结论"));
+});
+
+test("Inbound direction exists, and an empty message never reaches the model", async () => {
+  let calls = 0;
+  const a = app({ interpretMessage: async () => { calls++; return { meaning: "x", tone: "neutral", subtext: "", replies: [], cultural_notes: [] }; } });
+  Object.assign(a.hooks.state, { meta: { emotions: [] }, home: { items: [], total: 0, watch: false, local_today: "2026-11-22" } });
+  assert.ok(a.context.viewNow().includes('data-act="c-hear"'));
+  await a.hooks.crossing.handle("hear", { dataset: {} });
+  assert.ok(a.hooks.overlay.innerHTML.includes("cross.hear_placeholder"));
+  await a.hooks.crossing.handle("hear-generate", { dataset: {} });
+  assert.equal(calls, 0);
+});
+
+test("Inbound result shows meaning, tone and copyable replies", async () => {
+  let sent = null;
+  const a = app({ interpretMessage: async (payload) => {
+    sent = payload;
+    return { meaning: "对方在提一个具体的请求", tone: "tense", subtext: "可能有点不满（不确定）",
+      replies: [{ tone: "polite", text: "明白，下次我先确认。" }], cultural_notes: ["这句在英语里偏直接"], target_lang: "zh", safety: "ok" };
+  } });
+  await a.hooks.crossing.handle("hear", { dataset: {} });
+  a.hooks.crossing.input({ dataset: { heard: "" }, value: "Could you be more careful next time?" });
+  await a.hooks.crossing.handle("hear-generate", { dataset: {} });
+  assert.equal(sent && sent.text, "Could you be more careful next time?");
+  assert.equal(sent.source_lang, "en");
+  assert.equal(sent.target_lang, "zh");
+  const html = a.hooks.overlay.innerHTML;
+  assert.ok(html.includes("cross.hear_tone_tense"));
+  assert.ok(html.includes("对方在提一个具体的请求"));
+  assert.ok(html.includes("可能有点不满"));
+  assert.ok(html.includes("明白，下次我先确认。"));
+  assert.ok(html.includes('data-act="c-copy-reply"'));
+});
+
+test("Interface language prefers a saved choice, then an explicit account setting, then the browser", async () => {
+  const a = app();
+  assert.equal(a.context.pickInitialLang(null, "en-US", null, false), "en");
+  assert.equal(a.context.pickInitialLang(null, "zh-CN", null, false), "zh");
+  assert.equal(a.context.pickInitialLang(null, "ja-JP", null, false), "en");  // 非中文浏览器默认英文
+  assert.equal(a.context.pickInitialLang("zh", "en-US", "en", true), "zh");    // 本机选过的最优先
+  assert.equal(a.context.pickInitialLang(null, "en-US", "zh", true), "zh");    // 账号明确设过
+  assert.equal(a.context.pickInitialLang(null, "en-US", "zh", false), "en");   // 只是默认值，不覆盖浏览器
+});
+
+test("AI is presented as part of the product, not an optional add-on", async () => {
+  const a = app();
+  Object.assign(a.hooks.state, {
+    meta: { emotions: [], regions: [], ai: { enabled: false } },
+    home: { items: [], total: 0, watch: false, local_today: "2026-11-22" },
+  });
+  assert.ok(a.context.viewNow().includes("cross.ai_disabled"));
+  a.hooks.state.meta.ai = { enabled: true, model: "deepseek-flash", provider: "deepseek", fallback: true };
+  assert.ok(!a.context.viewNow().includes("cross.ai_disabled"));
+  const mine = a.context.viewMe();
+  assert.ok(mine.includes("ai.connected"));
+  assert.ok(mine.includes('data-act="ai-selftest"'));
+});
+
+test("Language choices come from the server configuration", async () => {
+  const a = app();
+  Object.assign(a.hooks.state, { meta: { emotions: [], languages: [
+    { code: "zh", label: "中文" }, { code: "en", label: "English" }, { code: "ja", label: "日语" },
+  ] } });
+  await a.hooks.crossing.handle("start", { dataset: { id: "deadline" } });
+  const html = a.hooks.overlay.innerHTML;
+  assert.ok(html.includes('value="ja"'));
+  assert.ok(html.includes('value="zh"'));
+  // 中文界面默认目标仍是英文，而不是服务器列表里的第一个
+  assert.ok(/value="en"\s+selected/.test(html));
+  await a.hooks.crossing.handle("back", { dataset: {} });
+  await a.hooks.crossing.handle("hear", { dataset: {} });
+  assert.ok(a.hooks.overlay.innerHTML.includes('value="ja"'));
+});
+
+test("Install entry appears in the browser and disappears once installed", async () => {
+  const a = app();
+  a.context.isStandalone = () => false;
+  a.context.isIosSafari = () => false;
+  const browserCard = a.context.installCard();
+  assert.ok(browserCard.includes("me.install_title"));
+  assert.ok(browserCard.includes('data-act="install-app"'));
+  a.context.isStandalone = () => true;
+  assert.equal(a.context.installCard(), "");
+  a.context.isStandalone = () => false;
+  a.context.isIosSafari = () => true;
+  const iosCard = a.context.installCard();
+  assert.ok(iosCard.includes("me.install_ios"));
+  assert.ok(!iosCard.includes('data-act="install-app"'), "iOS 没有系统安装框，不该给按钮");
+});
+
+test("Web keeps session in cookies and never asks for a token", async () => {
+  let seen = null;
+  const c = client(async (url, init) => { seen = init.headers; return response({ account: { user: { id: 1 } } }); });
+  assert.equal(c.context.isNativeShell(), false);
+  await c.api.login("someone", "secret");
+  assert.equal(seen.Authorization, undefined);
+  assert.equal(seen["X-Tether-Token-Auth"], undefined);
+});
+
+test("Native shell gets a token, sends it as Bearer, and forgets it on logout", async () => {
+  const store = new Map();
+  const storage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, value),
+    removeItem: (key) => store.delete(key),
+  };
+  const sent = [];
+  const c = client(async (url, init) => {
+    sent.push({ url, headers: init.headers });
+    if (url.includes("/api/auth/login")) return response({ account: { user: { id: 1 } }, token: "tok-abc", token_type: "Bearer" });
+    return response({ ok: true });
+  }, { href: "capacitor://localhost/", storage });
+
+  assert.equal(c.context.isNativeShell(), true);
+  const session = await c.api.login("someone", "secret");
+  assert.equal(sent[0].headers["X-Tether-Token-Auth"], "bearer", "壳内登录要显式要 token");
+  assert.equal(session.token, "tok-abc");
+  c.context.setAuthToken(session.token);
+  assert.equal(store.get("tether.token"), "tok-abc", "token 存进壳内存储");
+
+  await c.api.account();
+  assert.equal(sent[1].headers.Authorization, "Bearer tok-abc");
+
+  // 冷启动：新的运行环境从存储里恢复 token
+  const restarted = client(async (url, init) => { sent.push({ url, headers: init.headers }); return response({ ok: true }); },
+    { href: "capacitor://localhost/", storage });
+  assert.equal(restarted.context.restoreAuthToken(), "tok-abc");
+  await restarted.api.home();
+  assert.equal(sent.at(-1).headers.Authorization, "Bearer tok-abc");
+
+  restarted.context.setAuthToken("");
+  assert.equal(store.has("tether.token"), false, "退出要清掉存储里的 token");
+});
+
+test("API base stays same-origin unless the shell injects a server address", async () => {
+  const same = client(async (url) => { assert.ok(url.startsWith("/qienty/api/home?")); return response({ items: [] }); });
+  await same.api.home();
+
+  const root = client(async (url) => { assert.ok(url.startsWith("/api/home?")); return response({ items: [] }); }, { href: "https://test.invalid/" });
+  await root.api.home();
+
+  const injected = client(async (url) => { assert.ok(url.startsWith("https://api.example.com/api/home?"), url); return response({ items: [] }); },
+    { href: "capacitor://localhost/", inject: "https://api.example.com/" });
+  await injected.api.home();
+
+  // 注入为空串、或只有空格时，仍然按同源处理（根部署 → 相对路径）
+  const blank = client(async (url) => { assert.ok(url.startsWith("/api/home?"), url); return response({ items: [] }); },
+    { href: "https://test.invalid/", inject: "   " });
+  await blank.api.home();
+});
+
+test("Microphone button only renders where speech input actually works", async () => {
+  const a = app();
+  // 桌面浏览器没有 SpeechRecognition：不渲染按钮，不留死控件
+  assert.equal(a.context.voiceSupport(), false);
+  assert.equal(a.context.micButton(), "");
+
+  // 支持语音的浏览器：渲染
+  a.context.window.SpeechRecognition = function SpeechRecognition() {};
+  assert.equal(a.context.voiceSupport(), true);
+  const browserButton = a.context.micButton();
+  assert.ok(browserButton.includes('data-act="mic"'));
+  assert.ok(browserButton.includes("note.voice"));
+
+  // 壳内：即使 webkitSpeechRecognition 存在也不算数，必须有原生桥
+  a.context.isNativeShell = () => true;
+  a.context.window.webkitSpeechRecognition = function SpeechRecognition() {};
+  assert.equal(a.context.voiceSupport(), false);
+  assert.equal(a.context.micButton(), "");
+  a.context.window.__TETHER_SPEECH__ = { start() {}, stop() {} };
+  assert.equal(a.context.voiceSupport(), true);
+  assert.ok(a.context.micButton().includes('data-act="mic"'));
+});
+
+test("Voice language setting is hidden where speech input cannot work", async () => {
+  const a = app();
+  Object.assign(a.hooks.state, { meta: { emotions: [], regions: [] }, account: { pro: false, user: { username: "x" } } });
+  const withoutVoice = a.context.viewMe();
+  assert.ok(!withoutVoice.includes('data-act="set-voice"'), "没有语音能力时不该出现语音语言选项");
+
+  a.context.window.SpeechRecognition = function SpeechRecognition() {};
+  const withVoice = a.context.viewMe();
+  assert.ok(withVoice.includes('data-act="set-voice"'));
+});
+
+test("System back gesture closes the overlay and ignores our own history pop", async () => {
+  const a = app();
+  Object.assign(a.hooks.state, { account: { user: { id: 1 } }, meta: { emotions: [], regions: [] } });
+  a.context.openOverlay('<div class="sheet">hi</div>', { focus: false, label: "x" });
+  assert.equal(a.hooks.overlay.hidden, false);
+
+  // 手机返回手势 / 安卓返回键 → popstate → 先关浮层
+  a.events.get("popstate")({ state: { view: "now" } });
+  assert.equal(a.hooks.overlay.hidden, true, "返回应该先关浮层，而不是退出应用");
+
+  // 我们再打开一次，然后主动关闭：关闭会自己发一次 history.back()，
+  // 那一下回来的 popstate 必须被认领，否则会把刚切到的视图弹回去。
+  a.context.openOverlay('<div class="sheet">again</div>', { focus: false, label: "x" });
+  assert.equal(a.hooks.overlay.hidden, false);
+  a.context.closeOverlay();
+  assert.equal(a.hooks.overlay.hidden, true);
+  a.hooks.state.view = "log";
+  a.events.get("popstate")({ state: { view: "now" } });
+  assert.equal(a.hooks.state.view, "log", "自己发出的 pop 不该触发页面回退");
 });
 
 let failures = 0;

@@ -1,13 +1,15 @@
 {
+  "id": "./",
   "name": "智心元流 · 情绪记录与自我调节",
   "short_name": "智心元流",
   "description": "自由表达日常情绪，按自己的节奏整理想法。登录后开始表达，主动选择保存，也可尝试自助练习。",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
   "background_color": "#F6F3EC",
-  "theme_color": "#3E5B4B",
+  "theme_color": "#F6F3EC",
   "lang": "zh-CN",
   "categories": [
     "health",
@@ -18,13 +20,25 @@
       "src": "./icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
       "src": "./icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "./icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

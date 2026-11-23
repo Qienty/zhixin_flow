@@ -242,6 +242,41 @@ class ReviewFixes(unittest.TestCase):
                 client.sendall(b'POST /api/import HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n')
                 self.assertTrue(client.recv(4096).startswith(b'HTTP/1.1 400'))
 
+    def test_cors_defaults_stay_local_and_allowlist_is_explicit(self):
+        """同源部署用不到 CORS；跨源（原生壳）必须显式列来源，且不能是通配。"""
+        def preflight(httpd, origin, method='OPTIONS'):
+            return self.http_get(httpd, '/api/meta', {
+                'Origin': origin,
+                'Access-Control-Request-Method': 'POST',
+                'Access-Control-Request-Headers': 'authorization',
+            }, method=method)
+
+        with self.http_server() as httpd:
+            # 默认：本机来源放行，其他一律不回 CORS 头
+            _, headers, _ = preflight(httpd, 'http://127.0.0.1:8000')
+            self.assertEqual(headers.get('Access-Control-Allow-Origin'), 'http://127.0.0.1:8000')
+            self.assertIn('Authorization', headers.get('Access-Control-Allow-Headers', ''))
+            self.assertIn('X-Tether-Token-Auth', headers.get('Access-Control-Allow-Headers', ''))
+            for origin in ('https://evil.example', 'capacitor://localhost', 'null', 'https://api.example.com'):
+                _, blocked, _ = preflight(httpd, origin)
+                self.assertNotIn('Access-Control-Allow-Origin', blocked, origin)
+            # 没有 Origin 就没有 CORS 头（同源请求）
+            _, same_origin, _ = self.http_get(httpd, '/api/health')
+            self.assertNotIn('Access-Control-Allow-Origin', same_origin)
+
+        with self.http_server(TETHER_ALLOWED_ORIGINS='https://api.example.com, capacitor://localhost') as httpd:
+            _, headers, _ = preflight(httpd, 'capacitor://localhost')
+            self.assertEqual(headers.get('Access-Control-Allow-Origin'), 'capacitor://localhost')
+            _, allowed, _ = preflight(httpd, 'https://api.example.com')
+            self.assertEqual(allowed.get('Access-Control-Allow-Origin'), 'https://api.example.com')
+            # 仍然逐字匹配：子域、带回斜杠的变体、通配符都不放行
+            for origin in ('https://evil.example.com', 'https://sub.api.example.com', 'https://api.example.com.evil.example'):
+                _, blocked, _ = preflight(httpd, origin)
+                self.assertNotIn('Access-Control-Allow-Origin', blocked, origin)
+            # 本机来源在配置存在时依然放行（本地调试不被配置打断）
+            _, local, _ = preflight(httpd, 'http://localhost:5173')
+            self.assertEqual(local.get('Access-Control-Allow-Origin'), 'http://localhost:5173')
+
     def test_http_connection_capacity_and_idle_timeout(self):
         with self.http_server(TETHER_HTTP_MAX_CONNECTIONS='1', TETHER_HTTP_TIMEOUT='1') as httpd:
             def wait_for_slot():

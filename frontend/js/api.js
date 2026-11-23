@@ -4,10 +4,73 @@ import { t } from "./i18n.js";
 let lang = "zh";
 const pending = new Set();
 
+/* 会话凭据：网页用 HttpOnly Cookie（JS 读不到），原生壳用 Bearer token。
+   壳内页面来源是 capacitor:// 之类，跨站 Cookie 不可靠，所以壳里必须走 token。
+   检测放这里，避免每个调用点各判断一次。 */
+const NATIVE = (() => {
+  try {
+    if (window.__TETHER_NATIVE__ === true) return true;
+    let protocol = (location.protocol || "").toLowerCase();
+    if (!protocol) {
+      // 少数 WebView 只给 href，从 URL 里补一次协议
+      try { protocol = new URL(location.href).protocol.toLowerCase(); } catch { protocol = ""; }
+    }
+    return protocol === "capacitor:" || protocol === "ionic:" || protocol === "file:";
+  } catch {
+    return false;
+  }
+})();
+
+let authToken = "";
+const TOKEN_KEY = "tether.token";
+
+export function isNativeShell() {
+  return NATIVE;
+}
+
+export function setAuthToken(value) {
+  authToken = typeof value === "string" ? value : "";
+  if (!NATIVE) return;
+  try {
+    if (authToken) localStorage.setItem(TOKEN_KEY, authToken);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* 壳内存储不可用时退化为仅本次会话有效 */
+  }
+}
+
+export function getAuthToken() {
+  return authToken;
+}
+
+export function restoreAuthToken() {
+  if (!NATIVE) return "";
+  try {
+    const stored = localStorage.getItem(TOKEN_KEY) || "";
+    if (stored) authToken = stored;
+    return authToken;
+  } catch {
+    return "";
+  }
+}
+
 /* 部署在子路径下（比如 /qienty/）时，接口地址必须跟着页面走。
    直接从当前页面推：根部署得到 ""，子路径部署得到 "/qienty"。
-   注意页面地址必须带结尾斜杠（/qienty/），否则这里会推成 "/"。 */
+   注意页面地址必须带结尾斜杠（/qienty/），否则这里会推成 "/"。
+
+   原生壳里页面来源是 capacitor://localhost，相对路径会指向壳本地，
+   所以壳启动时把真实服务地址注入 window.__TETHER_API_BASE__（如 https://api.example.com），
+   其余环境一律保持同源相对路径 —— 不影响现在的服务器部署方式。 */
 const BASE = (() => {
+  try {
+    const injected = typeof window !== "undefined" ? window.__TETHER_API_BASE__ : "";
+    if (typeof injected === "string" && injected.trim()) {
+      const value = injected.trim();
+      return value === "/" ? "" : value.replace(/\/+$/, "");
+    }
+  } catch {
+    /* 注入值异常时回落到同源 */
+  }
   try {
     const path = new URL(".", location.href).pathname;
     return path === "/" ? "" : path.replace(/\/$/, "");
@@ -28,7 +91,7 @@ function qs(params = {}) {
   return search.toString();
 }
 
-async function call(path, { method = "GET", body, params, signal, timeout = 30000 } = {}) {
+async function call(path, { method = "GET", body, params, signal, timeout = 30000, headers: extraHeaders = null } = {}) {
   const url = `${BASE}${path}?${qs(params)}`;
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -38,6 +101,8 @@ async function call(path, { method = "GET", body, params, signal, timeout = 3000
   const timer = setTimeout(() => { timedOut = true; cancel(); }, timeout);
   pending.add(controller);
   const init = { method, headers: {}, signal: controller.signal };
+  if (authToken) init.headers.Authorization = `Bearer ${authToken}`;
+  if (extraHeaders) Object.assign(init.headers, extraHeaders);
   try {
     if (body !== undefined) {
       init.headers["Content-Type"] = "application/json";
@@ -105,6 +170,9 @@ export const api = {
     call(`/api/entries/${id}/intervention`, { method: "POST", body: payload }),
   translateExpression: (payload, signal) =>
     call("/api/expression/translate", { method: "POST", body: payload, signal, timeout: 120000 }),
+  interpretMessage: (payload, signal) =>
+    call("/api/expression/interpret", { method: "POST", body: payload, signal, timeout: 120000 }),
+  aiSelftest: () => call("/api/ai/selftest", { method: "POST", timeout: 60000 }),
 
   stats: () => call("/api/stats/basic"),
   weeklyCard: () => call("/api/weekly-card"),
@@ -118,10 +186,11 @@ export const api = {
   setSettings: (payload) => call("/api/account/settings", { method: "PATCH", body: payload }),
 
   me: () => call("/api/auth/me"),
+  /* 壳内要 token：请求头显式声明，服务端才把会话 token 放进响应体。 */
   login: (username, password) =>
-    call("/api/auth/login", { method: "POST", body: { username, password } }),
+    call("/api/auth/login", { method: "POST", body: { username, password }, headers: tokenHandshake() }),
   register: (username, password) =>
-    call("/api/auth/register", { method: "POST", body: { username, password } }),
+    call("/api/auth/register", { method: "POST", body: { username, password }, headers: tokenHandshake() }),
   logout: () => call("/api/auth/logout", { method: "POST" }),
   changePassword: (old_password, new_password) =>
     call("/api/auth/password", { method: "POST", body: { old_password, new_password } }),
@@ -137,6 +206,12 @@ export const api = {
 
 export function apiBase() {
   return BASE;
+}
+
+/* 登录/注册时带上这个头，服务端才会把 token 交给壳。
+   网页不发，会话仍然只在 HttpOnly Cookie 里。 */
+export function tokenHandshake() {
+  return NATIVE ? { "X-Tether-Token-Auth": "bearer" } : null;
 }
 
 export function tzOffset() {

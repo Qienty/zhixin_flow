@@ -484,6 +484,19 @@ CRISIS = {
 
 REGION_KEYS = list(CRISIS.keys())
 
+# 危机资源是合规红线：每条号码都要有可核对的来源与核对日期。
+# 核对节奏见 docs/crisis-resources.md（至少每 6 个月一次，号码变更立即更新）。
+CRISIS_VERIFIED_AT = "2026-11-22"
+CRISIS_SOURCES = {
+    "CN": "https://www.nhc.gov.cn/",
+    "US": "https://988lifeline.org/",
+    "CA": "https://988.ca/",
+    "UK": "https://www.samaritans.org/",
+    "AU": "https://www.lifeline.org.au/",
+    "EU": "https://findahelpline.com/",
+    "OTHER": "https://findahelpline.com/",
+}
+
 DISCLAIMER = {
     "zh": "本产品是情绪记录与自我调节工具，不提供医疗建议、诊断或治疗，也不能替代专业帮助。如果你处于危险中，请联系当地急救服务或危机热线。",
     "en": "This is an emotion-logging and self-regulation tool. It does not provide medical advice, diagnosis, or treatment, and is not a substitute for professional care. If you are in danger, contact local emergency services or a crisis line.",
@@ -540,6 +553,8 @@ def crisis_for(region: str, lang: str) -> dict:
         "label": data["label"].get(lang) or data["label"]["zh"],
         "emergency": data["emergency"].get(lang) or data["emergency"]["zh"],
         "lines": lines,
+        "verified_at": CRISIS_VERIFIED_AT,
+        "source": CRISIS_SOURCES.get(region, ""),
         "free_note": {
             "zh": "这条路径上的资源永久免费，不设付费墙。",
             "en": "Resources on this path are free forever, never behind a paywall.",

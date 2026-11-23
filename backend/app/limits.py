@@ -14,9 +14,14 @@ def setting(name, default, low=1, high=3600):
 
 
 class LimitError(Exception):
-    def __init__(self, seconds, message="Too many requests. Please try again later."):
+    """限流。reason 给接口层用来选本地化文案，message 只作兜底。"""
+
+    REASONS = {"in_flight", "cooldown", "capacity", "ip_window", "global_window"}
+
+    def __init__(self, seconds, message="Too many requests. Please try again later.", reason=""):
         super().__init__(message)
         self.retry_after = max(1, math.ceil(seconds))
+        self.reason = reason if reason in self.REASONS else ""
 
 
 _lock = threading.RLock()
@@ -45,11 +50,11 @@ def analysis_slot(user_id):
             if now - started >= interval and key not in _analysis_active:
                 del _analysis_starts[key]
         if user_id in _analysis_active:
-            raise LimitError(5, "An analysis is already running for this account.")
+            raise LimitError(5, "An analysis is already running for this account.", reason="in_flight")
         if user_id in _analysis_starts:
-            raise LimitError(interval - (now - _analysis_starts[user_id]))
+            raise LimitError(interval - (now - _analysis_starts[user_id]), reason="cooldown")
         if len(_analysis_active) >= capacity or len(_analysis_starts) >= 4096:
-            raise LimitError(5, "Analysis capacity is busy. Please try again later.")
+            raise LimitError(5, "Analysis capacity is busy. Please try again later.", reason="capacity")
         _analysis_active.add(user_id)
         _analysis_starts[user_id] = now
     try:
@@ -72,8 +77,8 @@ def registration_attempt(ip):
         _registration_global[:] = [stamp for stamp in _registration_global if now - stamp < 60]
         stamps = _registrations.get(ip, [])
         if len(stamps) >= per_ip:
-            raise LimitError(window - (now - stamps[0]))
+            raise LimitError(window - (now - stamps[0]), reason="ip_window")
         if len(_registration_global) >= 40 or (ip not in _registrations and len(_registrations) >= 4096):
-            raise LimitError(60)
+            raise LimitError(60, reason="global_window")
         _registrations.setdefault(ip, []).append(now)
         _registration_global.append(now)

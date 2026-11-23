@@ -126,6 +126,7 @@ def _row_to_user(row: sqlite3.Row) -> dict:
         "plan": row["plan"],
         "region": row["region"],
         "lang": row["lang"],
+        "lang_set": bool(row["lang_set"]),
         "created_at": row["created_at"],
     }
 
@@ -193,6 +194,9 @@ def update_user(user_id: int, **fields) -> dict:
     allowed = {"plan", "region", "lang"}
     sets = [f"{k} = ?" for k in fields if k in allowed]
     values = [v for k, v in fields.items() if k in allowed]
+    # 显式选过语言之后，浏览器语言不再覆盖它（多设备一致）。
+    if fields.get("lang") in ("zh", "en"):
+        sets.append("lang_set = 1")
     if sets:
         values.append(db.now_iso())
         values.append(user_id)

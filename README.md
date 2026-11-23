@@ -12,6 +12,8 @@ python backend/server.py 8000
 
 访问 http://127.0.0.1:8000/。Windows 可运行 `start.bat`，优先使用 PATH 中的 Python；项目不附带 Python 运行时。命令行未指定端口时可用 `PORT` 配置，`HOST` 默认 `127.0.0.1`。
 
+界面语言优先级：**本机选择（localStorage）> 账号里明确设置过 > 浏览器语言 > 中文**。首次访问按浏览器语言决定，非中文浏览器直接进英文界面；用户在账号里点过语言之后，多设备都以账号为准（`lang_set` 标记区分"默认值"和"用户选过"）。
+
 首次启动自动建库并迁移表结构。每个账号的数据相互隔离；升级前应备份 SQLite 数据库。默认位置为 `backend/data/tether.db`，可通过进程环境变量 `TETHER_DATA_DIR` 指定其他数据目录。不要删除数据库来更新应用。
 
 ## 自由表达与保存选择
@@ -28,7 +30,9 @@ python backend/server.py 8000
 
 跨语言表达接口为 `POST /api/expression/translate`，只接受当前草稿、目标语言和当前整理方式；服务端不持久化转换结果，并沿用 AI 账号并发与冷却限制。未配置 AI 服务时，原有本地表达、下载和账号保存流程仍可使用。
 
-首页同时提供两个入口：「记下此刻」保留原有自由表达；「说给对方听」是独立的跨境表达入口，内置 8 个真实场景（延期、拒绝、道歉、求助、冲突复盘、坏消息、争取、边界）。选一个场景、填 1—4 个空（发生了什么 / 原来的时间 / 你希望对方怎么做 / 补充），再选对方身份与语气，接口按场景写出一条可以直接复制发出去的消息，并附一个不同语气的备选版本和最多两条语气提示。接口新增可选字段 `scene`、`tone`（polite/direct/close）、`relation`（professor/manager/client/peer/friend）和 `details`；只传 `text` 时行为与原接口一致。场景与字段清单见 [跨境表达场景](docs/cross-border-scenes.md)。
+首页同时提供两个入口：「记下此刻」保留原有自由表达；「说给对方听」是独立的跨语言沟通入口，内置 8 个真实场景（延期、拒绝、道歉、求助、冲突复盘、坏消息、争取、边界）。选一个场景、填 1—4 个空（发生了什么 / 原来的时间 / 你希望对方怎么做 / 补充），再选对方身份与语气，接口按场景写出一条可以直接复制发出去的消息，并附一个不同语气的备选版本和最多两条语气提示。接口新增可选字段 `scene`、`tone`（polite/direct/close）、`relation`（professor/manager/client/peer/friend）和 `details`；只传 `text` 时行为与原接口一致。场景与字段清单见 [跨境表达场景](docs/cross-border-scenes.md)。
+
+同一张卡片还提供反向的口径：「对方的话没看懂？」把对方发来的一句贴进来，`POST /api/expression/interpret` 会拆成字面意思、语气档（warm/neutral/tense/harsh/ambiguous）和「可能是」的潜台词，并给 1—2 条可直接复制发送的回复。语气一律标注为推测，不做人格或动机判断；命中临床表述整条拒绝。两个方向都只在用户主动点击时发送，结果不落库。
 
 本轮需求依据、实现范围与验收方式见 [问卷驱动的项目改进](docs/survey-improvements.md)。
 
@@ -58,6 +62,8 @@ python backend/server.py 8000
 
 ## AI 与 Pro
 
+AI 是这个产品的核心能力，不是可选插件：跨语言沟通、解读对方的话、Pro 层记录分析都由同一条模型连接提供。配好之后在「我的」页可以看到连接状态和模型名，并点「测试连接」验证一次最小调用（返回模型与耗时）。
+
 Pro 通过兑换码开通，没有订阅或支付。复制 `.env.example` 为 `.env` 并配置兼容服务：
 
 ```ini
@@ -65,6 +71,17 @@ TETHER_AI_API_KEY=your-key
 TETHER_AI_BASE_URL=https://api.deepseek.com/v1
 TETHER_AI_MODEL=deepseek-flash
 ```
+
+供应商矩阵（任何 OpenAI 兼容 `/chat/completions` 都能接）：
+
+| 场景 | Base URL | 说明 |
+|---|---|---|
+| DeepSeek | `https://api.deepseek.com/v1` | 默认配置，支持 `reasoning_effort` |
+| OpenAI | `https://api.openai.com/v1` | 需支持 `response_format: json_object` |
+| 自建 / 代理 | 你的地址 | 需兼容上面的 JSON 模式 |
+| 本地离线 | `http://127.0.0.1:11434/v1` | Ollama 等本地服务，无网也能演示 |
+
+可选配置：`TETHER_AI_FALLBACK_BASE_URL` / `TETHER_AI_FALLBACK_MODEL` / `TETHER_AI_FALLBACK_API_KEY` 提供备用端点，主用网络失败时自动切换；`TETHER_AI_TIMEOUT`、`TETHER_AI_MAX_TOKENS`、`TETHER_AI_REASONING_EFFORT` 控制超时、输出预算与推理强度；`TETHER_LANGUAGES`（默认 `zh,en`）决定对外可选的目标语言。加一门语言只需要在 `backend/app/pragmatics.py` 的 `LANGUAGES` 里补一条四维配置，并把代码加进这个变量，接口、提示词与前端下拉框都会自动跟随。`POST /api/ai/selftest` 与其它模型调用共用并发和冷却限制（每账号 60 秒一次），避免被当成免费打模型的通道。
 
 打开总结页仅计算统计与读取有效缓存。用户点击「开始分析 / 重新分析」才会调用模型；没配 key、样本不足或请求失败时保留规则统计。模型会收到聚合结果及最多 60 条记录摘要（原因最多 40 字、备注最多 60 字）。
 
@@ -94,6 +111,8 @@ python -m app.codes --list
 
 数据保存在部署服务器上的明文 SQLite 数据库，按账号隔离，非端到端加密。拥有服务器或数据库权限的管理员可能访问记录；导出文件需要自行保管。HTTPS 部署时传输加密。网站不会因为存在账号体系就自动获得数据库加密。
 
+危机资源（`GET /api/crisis`）按地区给出可执行号码或官方查询入口，每条都带来源与核对日期（接口返回 `verified_at`、`source`，界面显示核对日期）。清单、来源与复核规则见 [危机资源](docs/crisis-resources.md)，测试会检查"每条资源可拨号或有链接、每个地区有 https 来源、中英文文案齐全"这三条不变式。
+
 密码使用 scrypt 哈希，新密码要求 8—128 个字符，拒绝常见弱口令、重复单字符和用户名。旧的短密码仍可登录，以免升级锁出用户；修改密码后其他会话失效。修改界面带确认框和长度提示。
 
 登录和旧密码验证按账号及客户端 IP 限速：5 分钟内账号最多 5 次失败，IP 最多 20 次；达到上限后返回 429 和 Retry-After。限速状态保存在单进程内存中，重启会清零。多进程部署应在网关增加共享限速。没有自助找回密码；界面提供联系管理员说明。
@@ -114,23 +133,31 @@ Python 提供 CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy �
 
 | 参数 | 默认值 | 范围 / 含义 |
 |---|---|---|
-| `TETHER_HTTP_TIMEOUT` | 65 | 1—300 秒，socket 空闲/读取超时，不是整个 AI 调用总时限；低于浏览器复用空闲连接的时间会在客户端正要复用连接时把它踢掉 |
-| `TETHER_HTTP_MAX_CONNECTIONS` | 64 | 1—512，活动连接线程上限 |
+| `TETHER_HTTP_TIMEOUT` | 65 | 1—300 秒，socket 空闲/读取超时，不是整个 AI 调用总时限；低于浏览器复用空闲连接的时间会在客户端正要复用连接时把它踢掉 || `TETHER_HTTP_MAX_CONNECTIONS` | 64 | 1—512，活动连接线程上限 |
 | `TETHER_AI_MIN_INTERVAL` | 60 | 1—3600 秒，每账号模型调用开始间隔 |
 | `TETHER_AI_MAX_CONCURRENT` | 4 | 1—64，全进程同时分析数 |
 | `TETHER_REGISTER_LIMIT` | 10 | 1—100，每 IP 每 5 分钟注册尝试上限 |
+| `TETHER_ALLOWED_ORIGINS` | 空 | 逗号分隔的跨源白名单，逐字匹配、不支持通配；`http(s)` 的 127.0.0.1 / localhost 默认放行。同源部署不需要设置 |
 
 这些限制保存在单进程内存中，重启清零；多进程或多实例需在代理/网关配置共享限流。原生 HTTP 服务仍建议放在 HTTPS 反向代理后使用。
+
+**同源部署不需要配置跨源**：浏览器直接访问站点、或 Nginx 同域反代时，页面与接口同源，CORS 不参与；`TETHER_ALLOWED_ORIGINS` 只在原生壳（`capacitor://`）或独立调试前端这类真正跨源的场景才需要。
+
+部署到服务器测试的最小改动：服务进程设 `HOST=0.0.0.0`（默认只听回环），端口按需；如需域名与 HTTPS，再按上面的反向代理说明配置。到服务器访问的方式（域名、IP、子路径）与本地完全一致，不需要改前端代码。
 
 挂到 `/qienty/` 时访问地址必须带尾部 `/`，Nginx 使用带尾部 `/` 的 proxy_pass 去掉前缀。前端及 service worker 均按当前部署前缀工作。
 
 应用代码不会自动启用 HTTPS，需由部署环境配置证书和代理。
 
-## PWA
+## 手机端（最终形态）与 PWA
+
+产品最终形态是手机应用，浏览器只用于开发和演示：界面按 390px 单列手机视口设计，桌面宽度下也保持同一条手机版心。当前已是可安装的 PWA——装到主屏后没有地址栏、断网能打开外壳。完整说明、真机验收清单和走向原生安装包的改造要点见 [手机端](docs/mobile.md)；排期、验收标准与待拍板事项见 [下一步计划书](docs/mobile-app-plan.md)。
+
+已处理的手机端细节：刘海与手势条避让（`--safe-top` / `--safe-bottom`）、软键盘弹出时布局收缩（`interactive-widget=resizes-content`）、输入框统一 16px（iOS 不放大页面）、主操作 44px 触控目标、去掉点击灰块与 300ms 延迟、状态栏颜色跟随主题、「我的」页内置「添加到主屏」入口（Android 调系统安装框，iOS 给 Safari 操作说明）。
 
 品牌标识采用「心形 + 情绪流线 + 光点」，沿用柔和墨绿、暖白与浅金配色。登录页、顶部导航和浏览器图标统一引用 `frontend/icon.svg`，清单使用同源生成的 192/512 PNG 图标与 180 像素 Apple 图标。
 
-修改 SVG 后运行 `node scripts/generate-icons.cjs` 同步生成三种 PNG。此开发工具需要 `sharp`，也可通过 `SHARP_MODULE` 指定已有包路径；应用运行仍不依赖第三方包。PNG 使用不透明底色，以便系统应用自己的图标裁切。
+修改 SVG 后运行 `node scripts/generate-icons.cjs` 同步生成五种 PNG（含两种 maskable）。此开发工具需要 `sharp`，也可通过 `SHARP_MODULE` 指定已有包路径；应用运行仍不依赖第三方包。满幅图标用不透明底色，供系统套用自己的裁切；`icon-maskable-*.png` 把设计缩到 76% 居中在品牌底色上，避免 Android 主屏按圆形/方形裁剪时切掉心形与流线边缘。
 
 Python 提供 `sw.js` 时自动将前端资产内容 hash 注入缓存版本。静态壳使用网络优先、离线兜底；API 不进入 service worker 缓存。若额外使用独立静态服务器，需等价实现 hash 注入，不能直接绕过 Python 托管。
 
@@ -146,11 +173,13 @@ Python 提供 `sw.js` 时自动将前端资产内容 hash 注入缓存版本。�
 | GET/PATCH/DELETE | `/api/entries/{id}` | 读取、补全、删除单条 |
 | GET | `/api/stats/basic`、`/api/insights` | 固定 14 天的统计与缓存；days 若传只能为 14 |
 | GET | `/api/weekly-card` | 最近 7 天可核对的记录与练习前后评分，并带前一周对照 |
+| POST | `/api/expression/translate` | 主动改写草稿或按场景写一条可发送的消息 |
+| POST | `/api/expression/interpret` | 解读对方发来的一句：字面、语气、潜台词与可选回复 |
 | POST | `/api/insights/analyze` | 手动 AI 分析，body 可传 force |
 | POST | `/api/import` | JSON entries 数组，原子追加并去重 |
 | GET | `/api/export?format=json或csv` | 全量导出，CSV 文本带公式注入防护 |
 | POST | `/api/demo/seed` | 仅追加，拒绝 reset=true |
-| POST | `/api/auth/register或login或logout或password` | 账号与会话 |
+| POST | `/api/auth/register或login或logout或password` | 账号与会话；网页用 HttpOnly Cookie，原生壳用 Bearer token |
 | GET | `/api/auth/me` | 未登录返回 logged_in=false，不制造首屏 401 |
 | GET | `/api/meta`、`/api/crisis` | 公开元数据与危机资源 |
 | GET | `/api/health` | 公开健康检查 |
@@ -200,6 +229,16 @@ python -B tests/run_browser.py review_browser.cjs
 ~~~
 
 三组浏览器脚本覆盖表达、练习及本次修复，包括真实保存 401、资源返回、练习关联重试、减少动效及评分焦点。截图写入忽略目录 `.cache/ui-preview`。可选执行 `python -B tests/benchmark_review.py` 复测隔离导入和静态表示性能；耗时不是 CI 硬阈值。
+
+手机端验收（产品最终形态在手机上，所以这一步不能省）。同样使用隔离启动器与真实浏览器引擎，在 5 个设备视口跑完整流程，量化检查横向溢出、触控目标、输入框字号、文字裁切、底部导航、浮层、装机条件与离线壳：
+
+~~~powershell
+npm install --prefix .cache/mobile-tools --no-package-lock playwright-core@1.62.1
+$env:PLAYWRIGHT_MODULE = (Resolve-Path '.cache/mobile-tools/node_modules/playwright-core').Path
+python -B tests/run_mobile_audit.py
+~~~
+
+通过标准是「0 个错误，0 个提醒」；每个设备 10 张截图写入 `.cache/mobile-shots`。当前基线：iPhone 13 / iPhone SE / Pixel 7 / 360px 小屏 / 横屏，全部通过。真机清单与原生安装包路线见 [手机端](docs/mobile.md)。这一步只在本机跑，尚未接入 CI——需要 Edge 与额外 npm 包，等确认 runner 上可复现后再加。
 
 本次问题与修复对照见 [2026-11-17 修复说明](docs/review-fixes-2026-11-17.md)。
 

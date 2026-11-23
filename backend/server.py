@@ -31,6 +31,32 @@ from app.limits import setting  # noqa: E402
 
 MAX_BODY = 8 * 1024 * 1024
 
+# 本地调试与壳内 WebView 的默认来源。真正的跨源部署必须显式配置。
+LOCAL_ORIGIN_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def allowed_origins() -> list[str]:
+    """TETHER_ALLOWED_ORIGINS：逗号分隔的完整来源，逐字匹配（不做通配）。"""
+    raw = os.environ.get("TETHER_ALLOWED_ORIGINS") or ""
+    return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
+
+
+def _origin_allowed(origin: str) -> bool:
+    normalized = (origin or "").strip().rstrip("/")
+    if not normalized:
+        return False
+    if normalized in allowed_origins():
+        return True
+    try:
+        parts = urllib.parse.urlsplit(normalized)
+    except ValueError:
+        return False
+    # 只有 http(s) 的本机来源才算"本地调试"。capacitor://localhost 之类必须显式配置，
+    # 否则任何自定义 scheme 只要 host 叫 localhost 就能读到数据。
+    if (parts.scheme or "").lower() not in ("http", "https"):
+        return False
+    return parts.hostname in LOCAL_ORIGIN_HOSTS
+
 mimetypes.add_type("application/javascript; charset=utf-8", ".js")
 mimetypes.add_type("text/css; charset=utf-8", ".css")
 mimetypes.add_type("image/svg+xml", ".svg")
@@ -214,17 +240,24 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- 输出 --------------------------------------------------------------
     def _cors(self) -> None:
-        """只回本机来源。
+        """跨源白名单。默认行为不变：只回本机来源。
+
+        同源部署（浏览器直接访问站点、或 Nginx 反代同域）根本用不到 CORS，
+        所以不设 TETHER_ALLOWED_ORIGINS 时，行为与以前完全一致。
+        需要跨源的是原生壳（capacitor://、自定义 scheme）或单独的调试前端，
+        这些来源必须用 `TETHER_ALLOWED_ORIGINS` 显式列出，逐字匹配，不支持通配。
 
         原来回的是 `*`，于是任何网页里的 JS 都能读写 127.0.0.1:8000 上的情绪
         记录——只绑本地回环，不等于别人访问不到。
         """
         origin = self.headers.get("Origin")
-        if origin and urllib.parse.urlsplit(origin).hostname in ("127.0.0.1", "localhost", "::1"):
+        if origin and _origin_allowed(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            # 壳内用 Bearer token：要允许 Authorization 和握手头，否则预检直接失败。
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Tether-Token-Auth")
+            self.send_header("Access-Control-Max-Age", "600")
 
     # 浏览器侧的基础防护。应用没有任何第三方脚本 / 字体 / 接口，所以 CSP 只放行同源；
     # style 要 'unsafe-inline'，是因为渲染时大量写了 style="--emo:…" 这类行内变量。

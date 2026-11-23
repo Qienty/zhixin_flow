@@ -20,10 +20,11 @@ import os
 import pathlib
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from . import db
+from . import db, pragmatics
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 
@@ -78,27 +79,68 @@ def _int_env(name: str, default: int, low: int, high: int) -> int:
         return default
 
 
+def _provider_name(base_url: str) -> str:
+    """按 endpoint 推断供应商，只用于展示与排障，不影响调用逻辑。"""
+    host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    if "deepseek" in host:
+        return "deepseek"
+    if "openai" in host:
+        return "openai"
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return "local"
+    if host.endswith(".openai.azure.com"):
+        return "azure"
+    return "custom"
+
+
 def config() -> dict:
     _load_dotenv()
     api_key = (os.environ.get("TETHER_AI_API_KEY") or "").strip()
     effort = (os.environ.get("TETHER_AI_REASONING_EFFORT") or "high").strip().lower()
     if effort not in ("low", "high", "max"):
         effort = "high"
+    base_url = (os.environ.get("TETHER_AI_BASE_URL") or DEFAULT_BASE_URL).strip().rstrip("/")
+    model = (os.environ.get("TETHER_AI_MODEL") or DEFAULT_MODEL).strip()
+    fallback_url = (os.environ.get("TETHER_AI_FALLBACK_BASE_URL") or "").strip().rstrip("/")
+    fallback = None
+    if fallback_url:
+        fallback = {
+            "base_url": fallback_url,
+            "model": (os.environ.get("TETHER_AI_FALLBACK_MODEL") or model).strip(),
+            "api_key": (os.environ.get("TETHER_AI_FALLBACK_API_KEY") or api_key).strip(),
+        }
     return {
         "enabled": bool(api_key),
         "api_key": api_key,
-        "base_url": (os.environ.get("TETHER_AI_BASE_URL") or DEFAULT_BASE_URL).strip().rstrip("/"),
-        "model": (os.environ.get("TETHER_AI_MODEL") or DEFAULT_MODEL).strip(),
+        "base_url": base_url,
+        "model": model,
+        "provider": _provider_name(base_url),
+        "fallback": fallback,
         "timeout": _int_env("TETHER_AI_TIMEOUT", 60, 5, 300),
         "max_tokens": _int_env("TETHER_AI_MAX_TOKENS", 4000, 200, 16000),
         "effort": effort,
     }
 
 
+def endpoints(cfg: dict) -> list[dict]:
+    """主用 endpoint 在前，备用在后；备用只在主用网络失败时使用。"""
+    primary = {"base_url": cfg["base_url"], "model": cfg["model"], "api_key": cfg["api_key"], "provider": cfg.get("provider", "custom")}
+    fallback = cfg.get("fallback")
+    if not fallback or not fallback.get("api_key"):
+        return [primary]
+    return [primary, {**fallback, "provider": _provider_name(fallback["base_url"])}]
+
+
 def public_config() -> dict:
-    """给 /api/meta 用：只暴露「有没有配」和模型名，绝不带 key。"""
+    """给 /api/meta 用：只暴露「有没有配」、模型和供应商，绝不带 key 或完整地址。"""
     cfg = config()
-    return {"enabled": cfg["enabled"], "model": cfg["model"] if cfg["enabled"] else None}
+    payload = {
+        "enabled": cfg["enabled"],
+        "model": cfg["model"] if cfg["enabled"] else None,
+        "provider": cfg["provider"] if cfg["enabled"] else None,
+        "fallback": bool(cfg["enabled"] and cfg["fallback"]),
+    }
+    return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -175,11 +217,17 @@ EXPRESSION_SYSTEM_PROMPT = """你是智心元流的跨语言表达编辑器。�
 - 必须再给 1 条 alternatives，用于换一种语气；它的 tone 与主版本不同，内容仍受同样的规则约束。
 - 输出仍然只能是 JSON：
 {"text":"主版本","intent":"share|ask_listening|ask_space|ask_advice|unclear","cultural_notes":["最多两条简短说明"],"alternatives":[{"tone":"polite|direct|close","text":"备选版本"}],"safety":"ok"}
+
+当 payload 带 pragmatics 时，那四个维度（directness / honorific / face_cost / conclusion_position）和目标语言的 guidance 就是本次写作的硬约束：
+- 按维度调整句子结构和敬语层级，不要套用你对某个国家文化的刻板印象，也不要添加 payload 里没有的事实。
+- conclusion_position 决定结论出现在第几句：early=第一句，after_context=先交代背景，late=请求放最后。
+- 维度之间冲突时，以 relation（收件人）为优先，其次 tone。
 """
 
 EXPRESSION_SCENES = ("deadline", "decline", "apologize", "ask_help", "conflict", "bad_news", "negotiate", "boundary")
-EXPRESSION_TONES = ("polite", "direct", "close")
-EXPRESSION_RELATIONS = ("professor", "manager", "client", "peer", "friend")
+# 语气与对象只在这里定义一次：四维语用表是唯一来源。
+EXPRESSION_TONES = tuple(pragmatics.TONES)
+EXPRESSION_RELATIONS = tuple(pragmatics.RELATIONS)
 EXPRESSION_DETAILS = ("what", "when", "want", "extra")
 
 # 每个场景只交代「先说哪一句、别说什么」。事实仍由用户填写，
@@ -309,51 +357,57 @@ def build_facts(entries: list[dict], days: int, lang: str, rules: dict) -> dict:
 
 
 def _post(cfg: dict, messages: list[dict], max_tokens: int) -> tuple[str, str]:
-    """一次 HTTP 调用，返回 (正文, finish_reason)。网络类错误重试一次。"""
-    payload = {
-        "model": cfg["model"],
-        "messages": messages,
-        "temperature": 0.6,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-        "reasoning_effort": cfg["effort"],
-        "stream": False,
-    }
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    last_error = ""
+    """一次 HTTP 调用，返回 (正文, finish_reason)。
 
-    for attempt in range(2):
-        request = urllib.request.Request(
-            cfg["base_url"] + "/chat/completions",
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": "Bearer " + cfg["api_key"],
-                "Content-Type": "application/json",
+    主用 endpoint 网络失败时自动切到备用 endpoint；4xx（除限流/超时）说明
+    请求本身有问题，换端点也救不了，直接报错。
+    """
+    last_error = ""
+    for endpoint in endpoints(cfg):
+        body = json.dumps(
+            {
+                "model": endpoint["model"],
+                "messages": messages,
+                "temperature": 0.6,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+                "reasoning_effort": cfg["effort"],
+                "stream": False,
             },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=cfg["timeout"]) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:200]
-            # 4xx 里除了限流和超时，重试也没意义
-            if 400 <= exc.code < 500 and exc.code not in (408, 429):
-                raise AIError(f"模型接口返回 {exc.code}：{detail}") from None
-            last_error = f"{exc.code} {detail}"
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            last_error = str(exc)
-        except ValueError:
-            raise AIError("模型返回的不是合法 JSON") from None
-        else:
-            choices = data.get("choices") or []
-            if not choices:
-                raise AIError("模型没有返回内容")
-            choice = choices[0]
-            content = (choice.get("message") or {}).get("content") or ""
-            return content, choice.get("finish_reason") or ""
-        if attempt == 0:
-            time.sleep(1.2)
+            ensure_ascii=False,
+        ).encode("utf-8")
+        for attempt in range(2):
+            request = urllib.request.Request(
+                endpoint["base_url"] + "/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": "Bearer " + endpoint["api_key"],
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=cfg["timeout"]) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")[:200]
+                last_error = f"{exc.code} {detail}"
+                # 限流和超时可以再试；其余 4xx（鉴权、模型不存在）换下一个端点。
+                if 400 <= exc.code < 500 and exc.code not in (408, 429):
+                    break
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_error = str(exc)
+            except ValueError:
+                raise AIError("模型返回的不是合法 JSON") from None
+            else:
+                choices = data.get("choices") or []
+                if not choices:
+                    raise AIError("模型没有返回内容")
+                choice = choices[0]
+                content = (choice.get("message") or {}).get("content") or ""
+                return content, choice.get("finish_reason") or ""
+            if attempt == 0:
+                time.sleep(1.2)
 
     raise AIError(f"模型接口连不上：{last_error}")
 
@@ -526,7 +580,7 @@ def _validate_expression(result: dict, target_lang: str) -> dict:
             break
     return {
         "text": text,
-        "target_lang": "en" if target_lang == "en" else "zh",
+        "target_lang": target_lang,
         "intent": intent,
         "cultural_notes": notes[:2],
         "alternatives": alternatives,
@@ -555,7 +609,7 @@ def rewrite_expression(
     cfg = config()
     if not cfg["enabled"]:
         raise AIError("未配置 AI 服务：请先配置 TETHER_AI_API_KEY")
-    language = "English" if target_lang == "en" else "简体中文"
+    language = pragmatics.model_name(target_lang)
     payload = {
         "source_text": text[:500],
         "target_language": language,
@@ -572,11 +626,102 @@ def rewrite_expression(
             for key, value in (details or {}).items()
             if key in EXPRESSION_DETAILS and str(value).strip()
         }
+    # 四维语用事实：模型照着写，不再自己猜目标文化的习惯。
+    payload["pragmatics"] = pragmatics.plan(
+        target_lang,
+        payload.get("tone", "") if scene in EXPRESSION_SCENES else "",
+        payload.get("relation", "") if scene in EXPRESSION_SCENES else "",
+    )
     messages = [
         {"role": "system", "content": EXPRESSION_SYSTEM_PROMPT},
         {"role": "user", "content": "请处理以下 JSON，不要添加事实：\n" + json.dumps(payload, ensure_ascii=False)},
     ]
     return _validate_expression(_parse_json(_chat(cfg, messages)), target_lang)
+
+
+# --------------------------------------------------------------------------- #
+# 反向：听懂对方说了什么
+# --------------------------------------------------------------------------- #
+
+# 解读一句话的语气，比改写更容易越界：模型会忍不住替对方下结论。
+# 所以输出被拆成「字面」「语气档」「可能的潜台词」三块，且必须带不确定标记。
+INTERPRET_TONES = ("warm", "neutral", "tense", "harsh", "ambiguous")
+
+INTERPRET_SYSTEM_PROMPT = """你是跨语言沟通的解读助手。用户收到了一句用非母语（或母语）写来的话，想知道它大概是什么意思、语气有多重、可以怎么回。
+
+规则：
+- 只解读这句话本身，不补充用户没有提供的信息，不推断对方的人格、动机或关系状态。
+- 严格区分「字面」和「推测」：meaning 只写这句话字面上在说什么；subtext 写「可能是」，并且必须带不确定性，不能写成结论。
+- 不评价用户，不建议对方应该怎么做；不做诊断、不建议治疗、不贴临床标签。
+- 给 1—2 个可直接复制发送的回复，语气档位不同（polite / direct / close），长度不超过 600 字符；回复里不能添加用户没有说过的事实。
+- 如果这句话本身包含威胁、自伤或危机信息，不要解读潜台词，只提示「这句话可能涉及安全风险，建议直接确认对方状态并联系当地支持资源」。
+- 输出只能是 JSON，不要代码块，不要解释：
+{"meaning":"字面上说了什么","tone":"warm|neutral|tense|harsh|ambiguous","subtext":"可能的潜台词（带不确定）","replies":[{"tone":"polite|direct|close","text":"可直接回复"}],"cultural_notes":["最多两条"],"safety":"ok"}
+"""
+
+
+def _validate_interpretation(result: dict, target_lang: str) -> dict:
+    """校验「听懂对方」的输出：拆开事实与推测，回复逐条过安全扫描。"""
+    if not isinstance(result, dict):
+        raise AIError("模型输出不是对象")
+    meaning = str(result.get("meaning") or "").strip()
+    if not meaning:
+        raise AIError("模型没有给出字面意思")
+    if len(meaning) > 400:
+        raise AIError("模型解读过长")
+    tone = str(result.get("tone") or "").strip().lower()
+    if tone not in INTERPRET_TONES:
+        tone = "ambiguous"
+    subtext = str(result.get("subtext") or "").strip()[:400]
+    notes = [str(note).strip()[:160] for note in (result.get("cultural_notes") or []) if str(note).strip()][:2]
+    replies = []
+    for item in result.get("replies") or []:
+        if not isinstance(item, dict):
+            continue
+        reply_text = str(item.get("text") or "").strip()
+        reply_tone = str(item.get("tone") or "").strip().lower()
+        if not reply_text or len(reply_text) > 600 or reply_tone not in EXPRESSION_TONES:
+            continue
+        replies.append({"tone": reply_tone, "text": reply_text})
+        if len(replies) == 2:
+            break
+    # 解读和回复都是会被用户直接看/直接发的文本，任何一处越界整条拒绝。
+    term = safety_violation({"meaning": meaning, "subtext": subtext, "replies": replies, "cultural_notes": notes})
+    if term:
+        raise AIError(f"模型输出含临床表述「{term}」，已拒绝显示")
+    return {
+        "meaning": meaning,
+        "tone": tone,
+        "subtext": subtext,
+        "replies": replies,
+        "cultural_notes": notes,
+        "target_lang": target_lang,
+        "safety": "ok",
+    }
+
+
+def interpret_message(text: str, source_lang: str = "en", target_lang: str = "zh", relation: str = "peer") -> dict:
+    """解读对方发来的一句话：字面、语气、可能的潜台词，以及可选的回复。
+
+    发送内容只在本次请求内使用，不落库；调用方必须先取得用户的明确操作。
+    """
+    cfg = config()
+    if not cfg["enabled"]:
+        raise AIError("未配置 AI 服务：请先配置 TETHER_AI_API_KEY")
+    payload = {
+        "message": text[:500],
+        "message_language": pragmatics.model_name(source_lang),
+        "explain_in": pragmatics.model_name(target_lang),
+        "relation": relation if relation in EXPRESSION_RELATIONS else "peer",
+        # 解读依赖两边文化的表达习惯：日语/韩语的含蓄程度和英语不是一回事。
+        "source_pragmatics": pragmatics.plan(source_lang),
+        "target_pragmatics": pragmatics.plan(target_lang),
+    }
+    messages = [
+        {"role": "system", "content": INTERPRET_SYSTEM_PROMPT},
+        {"role": "user", "content": "请解读以下 JSON 里的 message，不要添加事实：\n" + json.dumps(payload, ensure_ascii=False)},
+    ]
+    return _validate_interpretation(_parse_json(_chat(cfg, messages)), target_lang)
 
 
 # --------------------------------------------------------------------------- #
@@ -701,3 +846,33 @@ def cache_clear(user_id: int, connection=None) -> None:
     finally:
         if connection is None:
             conn.close()
+
+
+def selftest() -> dict:
+    """一次最小调用，验证 key、endpoint 与 JSON 输出能力。
+
+    这是「AI 是产品的一部分」的运维入口：部署后先点一次，就知道模型通不通、
+    大概多快。调用方负责限流，不要让它变成免费打模型的通道。
+    """
+    cfg = config()
+    if not cfg["enabled"]:
+        raise AIError("未配置 TETHER_AI_API_KEY")
+    started = time.monotonic()
+    content, _ = _post(
+        cfg,
+        [
+            {"role": "system", "content": "You are a connectivity probe. Reply with JSON only."},
+            {"role": "user", "content": 'Return exactly {"ok": true} and nothing else.'},
+        ],
+        256,
+    )
+    parsed = _parse_json(content)
+    if parsed.get("ok") is not True:
+        raise AIError("模型没有按约定返回 JSON")
+    return {
+        "ok": True,
+        "ms": int((time.monotonic() - started) * 1000),
+        "model": cfg["model"],
+        "provider": cfg["provider"],
+        "fallback": bool(cfg["fallback"]),
+    }
