@@ -33,31 +33,33 @@
 :root {
   color-scheme: light;
 
-  --paper: #f6f3ec;
-  --paper-2: #f1ece1;
-  --surface: #fffefa;
-  --surface-soft: #fbfaf6;
+  /* 骨色底：去掉黄味，只留一点暖，接近纸与石；不与砖红组成"奶油+赤陶"的助手配色 */
+  --paper: #f2f2ee;
+  --paper-2: #e9e9e3;
+  --surface: #fdfdfd;
+  --surface-soft: #f4f5f3;
   --ink: #1b211d;
   --ink-2: #48524b;
-  --muted: #626b62;
-  --faint: #626b62;
-  --line: #e4e5da;
-  --line-strong: #d3ccbb;
+  --muted: #5c655d;
+  --faint: #5c655d;
+  --line: #e2e2db;
+  --line-strong: #cbcbc3;
 
   --moss: #3e5b4b;
   --moss-2: #55735f;
   --moss-tint: #e8eee7;
-  --brick: #b4523f;
+  /* 正文里当文字用时需要 ≥4.5:1，原 #b4523f 在骨色底上只有 4.49 */
+  --brick: #9c4331;
   --amber: #c08a3e;
 
   /* 反色前景：铺在 --ink / --moss 实底上的文字 */
-  --on-ink: #f6f3ec;
+  --on-ink: #f2f2ee;
   --on-moss: #ffffff;
 
   /* 半透明派生色：深浅两套的唯一差别在这里，组件里不再写死 rgba */
   --veil: rgba(27, 33, 29, 0.05);       /* hover 底纹 */
   --veil-2: rgba(27, 33, 29, 0.34);     /* 浮层遮罩 */
-  --glass: rgba(246, 243, 236, 0.86);   /* 顶栏毛玻璃 */
+  --glass: #f2f2ee;                       /* 顶栏：不透明，不再用毛玻璃 */
   --glass-2: rgba(255, 255, 255, 0.9);  /* 标签栏毛玻璃 */
   --grain-ink: rgba(27, 33, 29, 0.035);
   --sheen: rgba(255, 255, 255, 0.6);    /* ghost 按钮 hover */
@@ -111,7 +113,7 @@
 
   --veil: rgba(233, 231, 223, 0.07);
   --veil-2: rgba(8, 11, 9, 0.6);
-  --glass: rgba(20, 24, 21, 0.86);
+  --glass: #141815;
   --glass-2: rgba(30, 36, 32, 0.92);
   --grain-ink: rgba(233, 231, 223, 0.03);
   --sheen: rgba(233, 231, 223, 0.06);
@@ -179,8 +181,6 @@ a { color: var(--moss); }
   top: 0;
   z-index: 30;
   background: var(--glass);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   border-bottom: 1px solid var(--veil);
   padding-top: var(--safe-top);
 }
@@ -277,9 +277,8 @@ a { color: var(--moss); }
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   padding: 18px;
-  box-shadow: var(--shadow-1);
 }
-.card.flat { box-shadow: none; background: var(--surface-soft); }
+.card.flat { background: var(--surface-soft); }
 .card.sheen { background: var(--card-sheen); }
 
 /* --------------------------------------------------------------- buttons */
@@ -339,7 +338,6 @@ a { color: var(--moss); }
   border-radius: var(--r-md);
   border: 1px solid var(--line);
   background: var(--surface);
-  box-shadow: var(--shadow-1);
   overflow: hidden;
   transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
@@ -351,7 +349,7 @@ a { color: var(--moss); }
   background: transparent;
   pointer-events: none;
 }
-.emo-tile:hover { box-shadow: var(--shadow-2); border-color: var(--line-strong); }
+.emo-tile:hover { border-color: var(--line-strong); }
 .emo-tile:active { transform: scale(0.972); }
 /* 建记录的请求在路上：瓦片先压暗并挡住后续点击，不然慢网络下双击会落两条 */
 .emo-tile.pending { opacity: 0.55; pointer-events: none; }
@@ -426,14 +424,13 @@ a { color: var(--moss); }
   border-radius: var(--r-md);
   background: var(--surface);
   border: 1px solid var(--line);
-  box-shadow: var(--shadow-1);
   text-align: left;
   width: 100%;
   transition: border-color 0.18s ease, transform 0.14s ease;
 }
 .entry:hover { border-color: var(--line-strong); }
 .entry:active { transform: scale(0.994); }
-.entry.sev-high { box-shadow: inset 3px 0 0 var(--sev), var(--shadow-1); }
+
 .entry .sev-col { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 2px; }
 .entry .sev-num {
   font-family: var(--font-serif);
@@ -510,7 +507,6 @@ a { color: var(--moss); }
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   padding: 13px 14px;
-  box-shadow: var(--shadow-1);
 }
 .stat .stat-value {
   font-family: var(--font-serif);
@@ -535,7 +531,6 @@ a { color: var(--moss); }
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   padding: 18px 18px 16px;
-  box-shadow: var(--shadow-1);
 }
 .pattern::before {
   content: "";
@@ -655,7 +650,6 @@ a { color: var(--moss); }
   border-radius: 8px;
   background: var(--ink);
   color: var(--on-ink);
-  box-shadow: var(--shadow-2);
   font-size: 10px;
   line-height: 1.5;
   text-align: center;
@@ -768,8 +762,6 @@ a { color: var(--moss); }
   background: var(--glass-2);
   border: 1px solid var(--line);
   box-shadow: 0 18px 40px -22px rgba(0, 0, 0, 0.5);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
 }
 .tab {
   display: flex;
@@ -795,8 +787,6 @@ a { color: var(--moss); }
   display: flex;
   justify-content: center;
   background: var(--veil-2);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   animation: fade 0.2s ease;
 }
 .overlay[hidden] { display: none; }
@@ -846,8 +836,6 @@ a { color: var(--moss); }
   position: absolute;
   inset: 0;
   background: var(--veil-2);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   animation: fade 0.18s ease;
 }
 .confirm-card {
@@ -1046,7 +1034,6 @@ html.confirm-open body { overflow: hidden; }
   border: 1px solid var(--line-strong);
   border-radius: var(--r-lg);
   padding: 16px 16px 14px;
-  box-shadow: var(--shadow-2);
 }
 .crisis-line {
   display: flex;
@@ -1086,7 +1073,6 @@ html.confirm-open body { overflow: hidden; }
   transition: opacity 0.22s ease, transform 0.22s ease;
   max-width: calc(100% - 40px);
   text-align: center;
-  box-shadow: var(--shadow-2);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
@@ -1141,7 +1127,6 @@ textarea { min-height: 88px; }
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   padding: 18px;
-  box-shadow: var(--shadow-1);
 }
 
 .list-row {
@@ -1260,7 +1245,6 @@ body.gated .view {
 .wheel-entry:hover {
   transform: translateY(-1px);
   border-color: var(--moss-2);
-  box-shadow: var(--shadow-1);
 }
 .wheel-entry:active { transform: translateY(0) scale(0.995); }
 .wheel-entry-mark {
@@ -1382,7 +1366,7 @@ button:disabled { cursor:default; opacity:.55; }
 .brand-wordmark .brand-name { font-size: 23px; line-height: 1.15; }
 .brand-caption { color: var(--muted); font-size: 11px; letter-spacing: .025em; }
 .brand-mark { box-shadow: none; }
-.topbar { background: var(--paper); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.topbar { background: var(--paper); }
 .topbar-inner { max-width: 560px; height: 76px; padding: 0 24px; }
 .topbar-right { gap: 0; flex-wrap: wrap; }
 .topbar .icon-btn { width: 44px; height: 44px; border-radius: 12px; }
@@ -1470,7 +1454,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; fon
 .tag { font-size: 11px; }
 .entry:hover { border-color: var(--line-strong); }
 .empty { border-style: solid; }
-.tabbar { width: min(460px, calc(100% - 32px)); bottom: calc(12px + var(--safe-bottom)); padding: 6px; gap: 4px; border-radius: 20px; background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; box-shadow: 0 4px 20px -10px #1b211d30; }
+.tabbar { width: min(460px, calc(100% - 32px)); bottom: calc(12px + var(--safe-bottom)); padding: 6px; gap: 4px; border-radius: 20px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 18px -12px rgba(27, 33, 29, 0.28); }
 .tab { min-height: 54px; padding: 8px 0; gap: 5px; border-radius: 14px; font-size: 11px; }
 .tab.on { background: var(--moss-tint); color: var(--ink); }
 .tab.on svg { color: var(--moss); }
@@ -1600,7 +1584,160 @@ body.gated .view { max-width: 480px; padding: 28px 24px calc(24px + var(--safe-t
 .install-card { border-color: var(--line-strong); gap: 8px; }
 .install-card .eyebrow { color: var(--ink); }
 .install-card p { margin: 0; }
+
+/* 记录页翻页器：上下各一个，页码居中，按钮保持 44px 触控高度 */
+.log-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.log-pager .btn { min-height: 44px; }
+.log-pager-status { flex: 1; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+#log-body .log-pager:first-child { margin-bottom: 4px; }
+#log-body .log-pager:last-child { margin-top: 16px; }
 .week-card { border-color: var(--line-strong); gap: 12px; }
 .week-lines { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .week-lines li { position: relative; padding-left: 16px; font-size: 14px; line-height: 1.7; color: var(--ink); }
 .week-lines li::before { content: ""; position: absolute; left: 0; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--moss); }
+
+
+/* ======================================================================
+   UI pass 2026-11-23 — 版式与细节
+   ----------------------------------------------------------------------
+   依据：移动端界面评审。四类问题：
+   1. 正文字号偏小（13px 为主，11px 大量出现），手机上读起来发虚；
+   2. 静止元素带阴影、选中态用品牌色铺底，颜色落在了"外壳"上而不是内容上；
+   3. 主按钮不止一个，次要动作和主行动长得一样，看不出该点哪个；
+   4. 焦点态不统一，键盘/辅助设备使用时看不出落在哪。
+   这里只改视觉，不改结构、不改交互流程。
+   ====================================================================== */
+
+/* 1. 字号梯度：正文 15，次级 15/1.7，元信息 12.5，说明文字不再低于 12 */
+body { font-size: 15px; line-height: 1.7; }
+.small { font-size: 15px; line-height: 1.7; }
+.tiny { font-size: 12.5px; line-height: 1.7; }
+.eyebrow {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+}
+.section-title { font-size: 20px; line-height: 1.45; }
+.display { letter-spacing: -0.01em; }   /* 中文标题不再压字距 */
+.body-lg { font-size: 16px; line-height: 1.7; }
+
+/* 2. 按钮家族：只有一个实心主按钮，其余是一步之遥的中性描边 */
+.btn { font-size: 15px; }
+.btn.sm { font-size: 14px; }
+.btn.soft {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+.btn.soft:hover { background: var(--surface-soft); border-color: var(--ink-2); }
+.btn.ghost { border-color: transparent; color: var(--ink-2); }
+.btn.ghost:hover { background: var(--veil); color: var(--ink); }
+
+/* 3. 静止的东西不带阴影：卡片靠 1px 线与色调分层 */
+.entry, .stat, .card, .plan-card, .crisis-card, .week-card, .practice-card { box-shadow: none; }
+.entry { box-shadow: none; }
+.entry.sev-high {
+  /* 强度用左边一条实色表示，不再用 inset 阴影 */
+  box-shadow: none;
+  border-left: 3px solid var(--sev);
+  padding-left: 12px;
+}
+.stat { box-shadow: none; border-color: var(--line); }
+
+/* 4. 导航选中态回到中性：品牌色留给内容，不铺在导航上 */
+.tab.on { background: var(--paper-2); color: var(--ink); }
+.tab.on svg { color: var(--ink); }
+.chip.on { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+
+/* 5. 焦点态统一：键盘可见、不压住内容 */
+a:focus-visible,
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--moss);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* 6. 记录行与元信息的可读性 */
+.entry .entry-cause { font-size: 15px; line-height: 1.6; }
+.entry .entry-time { font-size: 12.5px; }
+.tag { font-size: 12px; }
+.emo-tile .emo-hint, .emo-tile .emo-branch { font-size: 12px; }
+.list-row .sub { font-size: 12.5px; }
+.week-lines li { font-size: 15px; }
+
+/* 7. 弹层与浮起的少量元素保留轻阴影，但比原来更克制 */
+.sheet, .confirm-card { box-shadow: 0 -12px 40px -28px rgba(27, 33, 29, 0.45); }
+.toast { box-shadow: 0 8px 24px -16px rgba(27, 33, 29, 0.5); }
+
+/* 8. 最小字号抬到 12：10—11px 的说明文字在手机上已经难读，
+      信息层级靠颜色与字重区分，不靠继续缩小 */
+.intensity-dates > span,
+.intensity-data thead th,
+.intensity-heading p,
+.practice-card-meta,
+.practice-history-row span span,
+.focus-hint,
+.brand-caption,
+.emo-tile .emo-hint,
+.emo-tile .emo-branch,
+.emo-secondary .emo-tile .emo-hint,
+.tag,
+.tab,
+.hero-copy .tiny,
+.emotion-section > .row-between .tiny { font-size: 12px; }
+
+/* 9. 图表与强度表里的数字用等宽数字，纵向对齐 */
+.stat .stat-value,
+.intensity-data td,
+.spark-value,
+.num { font-variant-numeric: tabular-nums; }
+
+/* 10. 强度图与统计标签：10px 的刻度和提示在手机上几乎不可读，
+       提到 12；tooltip 只在悬停/聚焦时出现，同样不低于 12 */
+.stat .stat-label { font-size: 12px; }
+.intensity-scale { font-size: 12px; }
+.intensity-dates > span,
+.intensity-ticks > span { font-size: 12px; }
+.intensity-tooltip { font-size: 12px; line-height: 1.5; }
+
+/* 11. 强度图的刻度与日期标签（其余 10px 来源） */
+.intensity-guides span { font-size: 12px; }
+.intensity-dates { font-size: 12px; }
+
+/* 12. 强度图图例与「查看每日数值」的摘要 */
+.intensity-legend { font-size: 12px; }
+.intensity-data > summary { font-size: 13px; }
+
+
+/* 13. 桌面宽屏下登录页不再是"一条居中的手机列 + 一大片空"：
+       左侧放品牌与插图，右侧是表单，两侧都有内容，空块消失 */
+@media (min-width: 1024px) {
+  body.gated .view { max-width: 1040px; padding: 7vh 32px 6vh; }
+  body.gated .auth-wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 420px);
+    grid-template-areas:
+      "mast    form"
+      "intro   form"
+      "intro   support"
+      "foot    support";
+    column-gap: 56px;
+    row-gap: 20px;
+    align-items: start;
+  }
+  body.gated .auth-masthead { grid-area: mast; }
+  body.gated .auth-intro { grid-area: intro; align-items: flex-start; }
+  body.gated .auth-card { grid-area: form; }
+  body.gated .auth-support { grid-area: support; margin-top: 0; }
+  body.gated .page-footnote { grid-area: foot; align-self: end; }
+  body.gated .auth-landscape { height: auto; max-height: 260px; }
+  body.gated .auth-landscape img { width: 100%; height: auto; object-fit: cover; }
+  body.gated .auth-intro .display { font-size: 32px; }
+  body.gated .auth-intro .small { font-size: 16px; max-width: 34em; }
+}

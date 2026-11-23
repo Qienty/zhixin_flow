@@ -1,4 +1,4 @@
-/* 智心元流 interface copy */
+﻿/* 智心元流 interface copy */
 const dict = {
   "zh": {
     "brand.caption": "给情绪一个落点",
@@ -260,6 +260,8 @@ const dict = {
     "log.previous": "上一页",
     "log.next": "下一页",
     "log.page": "第 {n} 页",
+    "log.page_of": "第 {n} / {total} 页",
+    "log.pager": "记录翻页",
     "log.severity_group": "强度 {n} 分",
     "log.pending_count": "{n} 条待补全",
     "log.complete_next": "开始逐条补全",
@@ -549,6 +551,8 @@ const dict = {
     "log.previous": "Previous",
     "log.next": "Next",
     "log.page": "Page {n}",
+    "log.page_of": "Page {n} of {total}",
+    "log.pager": "Entry pages",
     "log.severity_group": "Intensity {n}",
     "log.pending_count": "{n} entries to complete",
     "log.complete_next": "Complete entries",

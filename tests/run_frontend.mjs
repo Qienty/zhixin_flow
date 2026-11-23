@@ -836,6 +836,41 @@ test("System back gesture closes the overlay and ignores our own history pop", a
   assert.equal(a.hooks.state.view, "log", "自己发出的 pop 不该触发页面回退");
 });
 
+test("Records page turns a page of eight instead of scrolling forever", async () => {
+  const seen = [];
+  const entry = (id) => ({ id, local_date: "2026-11-22", severity: 3, emotion: "calm", cause: "x",
+    occurred_at: "2026-11-22T10:00:00+00:00", local_hour: 10, tz_offset: 480, tags: [], note: "" });
+  const a = app({
+    entries: async (params) => {
+      seen.push(params);
+      const start = params.offset || 0;
+      return { items: Array.from({ length: Math.max(0, Math.min(8, 25 - start)) }, (_, i) => entry(start + i + 1)), total: 25, next_cursor: null };
+    },
+  });
+  Object.assign(a.hooks.state, { view: "log", meta: { emotions: [] } });
+  a.context.indexEmotions();
+
+  await a.context.loadEntries({ page: 0 });
+  assert.deepEqual([seen.at(-1).limit, seen.at(-1).offset], [8, 0]);
+  assert.equal(a.hooks.state.entries.length, 8);
+  assert.equal(a.context.logPageCount(), 4, "25 条按每页 8 条算 4 页");
+
+  await a.context.loadEntries({ page: 3 });
+  assert.equal(seen.at(-1).offset, 24, "第 4 页从第 25 条开始");
+  assert.equal(a.hooks.state.entries.length, 1);
+  assert.equal(a.hooks.state.logPage, 3);
+
+  const html = a.context.entryListHtml(a.hooks.state.entries);
+  assert.equal((html.match(/class="log-pager"/g) || []).length, 2, "翻页器在列表上下各一个");
+  assert.ok(html.includes("log.page_of"));
+  assert.ok(html.includes('data-act="previous"'));
+
+  // 已经是最后一页：再点下一页不会发请求
+  const before = seen.length;
+  await a.context.pageLog(true);
+  assert.equal(seen.length, before, "到最后一页后不再请求");
+});
+
 let failures = 0;
 for (const { name, run } of tests) {
   try { await run(); console.log(`PASS ${name}`); }

@@ -59,7 +59,7 @@ export function restoreAuthToken() {
    注意页面地址必须带结尾斜杠（/qienty/），否则这里会推成 "/"。
 
    原生壳里页面来源是 capacitor://localhost，相对路径会指向壳本地，
-   所以壳启动时把真实服务地址注入 window.__TETHER_API_BASE__（如 https://api.example.com），
+   所以壳启动时把真实服务地址注入 window.__TETHER_API_BASE__（例如 https://api.your-domain.tld），
    其余环境一律保持同源相对路径 —— 不影响现在的服务器部署方式。 */
 const BASE = (() => {
   try {

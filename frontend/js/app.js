@@ -24,7 +24,7 @@ const SEV_LABEL = {
 };
 
 const VIEWS = ["now", "practice", "log", "insights", "me"];
-const PAGE_SIZE = 40;
+const LOG_PAGE_SIZE = 8;       // 记录页每页条数：翻页制的页大小，改这一个数就行
 const REFRESH_AGE_MS = 30000;
 const loadedAt = { now: 0, practice: 0, log: 0, insights: 0, me: 0 };
 const viewRefreshes = new Map();
@@ -43,9 +43,7 @@ const state = {
   insightsDays: 14,
   home: { items: [], watch: false, total: 0 },
   logReady: false,
-  logCursor: null,
   logTotal: 0,
-  logPages: [null],
   logPage: 0,
   logBusy: false,
   logError: "",
@@ -346,20 +344,25 @@ async function loadAccount() {
 }
 
 let logSeq = 0;
-async function loadEntries({ cursor = null, page = 0 } = {}) {
+/* 记录页是翻页制：一页十条，翻页时整页替换并回到顶部，不做无限下拉。
+   用 offset 分页（服务端同时支持 cursor 与 offset），这样能直接算出总页数，
+   分页器显示「第 N / M 页」，也不会因为下拉加载让页面无限变长。 */
+async function loadEntries({ page = 0 } = {}) {
   const seq = ++logSeq;
   state.logBusy = true;
   state.logError = "";
   try {
-    const res = await api.entries({ ...state.filter, limit: PAGE_SIZE, cursor });
+    const res = await api.entries({ ...state.filter, limit: LOG_PAGE_SIZE, offset: page * LOG_PAGE_SIZE });
     if (seq !== logSeq) return;
+    // 删到当前页空了：退回上一页，而不是停在空白页
+    if (!res.items.length && page > 0) {
+      state.logBusy = false;
+      return loadEntries({ page: Math.max(0, Math.min(page - 1, logPageCount(res.total, LOG_PAGE_SIZE) - 1)) });
+    }
     state.entries = res.items;
     state.logTotal = res.total;
-    state.logCursor = res.next_cursor;
     state.logReady = true;
     state.logPage = page;
-    if (!page) state.logPages = [null];
-    state.logPages[page + 1] = res.next_cursor;
     loadedAt.log = Date.now();
   } catch (err) {
     if (seq === logSeq && err.name !== "AbortError") state.logError = err.message;
@@ -370,6 +373,10 @@ async function loadEntries({ cursor = null, page = 0 } = {}) {
       if (state.view === "log" && !sessionExpired) renderLogList();
     }
   }
+}
+
+function logPageCount(total = state.logTotal, size = LOG_PAGE_SIZE) {
+  return Math.max(1, Math.ceil((total || 0) / size));
 }
 async function loadHome() {
   const seq = ++homeSeq;
@@ -384,11 +391,13 @@ async function reloadLog() {
   if (state.view === "log") renderLogList();
 }
 async function pageLog(forward) {
-  if (state.logBusy || (forward && !state.logCursor)) return;
-  const page = Math.max(0, state.logPage + (forward ? 1 : -1));
-  await loadEntries({ cursor: state.logPages[page], page });
+  if (state.logBusy) return;
+  const target = Math.max(0, Math.min(state.logPage + (forward ? 1 : -1), logPageCount() - 1));
+  if (target === state.logPage) return;
+  await loadEntries({ page: target });
   renderLogList();
-  $("#log-body")?.scrollIntoView({ block: "start" });
+  // 翻页后回到列表顶部，像翻书一样从第一行开始看
+  $("#log-body")?.scrollIntoView({ block: "start", behavior: "auto" });
 }
 async function entriesChanged() {
   invalidateInsights();
@@ -537,7 +546,7 @@ async function ensureViewData(view, { force = false, silent = false } = {}) {
       if (view === "insights" && (stale || !state.insights)) jobs.push(loadInsights());
       if (view === "practice" && (stale || !practice.ready)) jobs.push(practice.load().then(() => { loadedAt.practice = Date.now(); }));
       if (view === "log" && (stale || !state.logReady)) {
-        jobs.push(loadEntries({ cursor: state.logPages[state.logPage], page: state.logPage }));
+        jobs.push(loadEntries({ page: state.logPage }));
       }
       await Promise.all(jobs);
       if (!state.account) return false;
@@ -758,6 +767,20 @@ function filteredEntries() {
   return state.entries;
 }
 
+/* 翻页器：页码 + 上一页/下一页。放在列表上下各一份——
+   翻完一页不用再滑回底部才能继续翻。 */
+function logPager() {
+  const total = logPageCount();
+  const current = Math.min(state.logPage + 1, total);
+  const atStart = state.logPage <= 0;
+  const atEnd = current >= total;
+  return `<div class="log-pager" role="group" aria-label="${t("log.pager")}">
+    <button class="btn ghost" data-act="previous" ${atStart || state.logBusy ? "disabled" : ""}>${t("log.previous")}</button>
+    <span class="tiny log-pager-status" aria-live="polite">${t("log.page_of", { n: current, total })}</span>
+    <button class="btn ghost" data-act="more" ${atEnd || state.logBusy ? "disabled" : ""}>${t("log.next")}</button>
+  </div>`;
+}
+
 /* 时间排序按日期分组；强度排序按分值分组，保留强度优先。 */
 function entryListHtml(list) {
   const error = state.logError ? `<div class="card stack gap-8" role="alert"><p class="small">${t("log.load_failed")}</p><p class="tiny">${esc(state.logError)}</p><button class="btn ghost" data-act="retry-log">${t("common.retry")}</button></div>` : "";
@@ -770,6 +793,7 @@ function entryListHtml(list) {
   }
   const page = list;
   let html = state.filter.unfilled ? `<div class="card row-between"><span class="small">${t("log.pending_count", { n: state.logTotal })}</span><button class="btn soft sm" data-act="complete-next">${t("log.complete_next")}</button></div>` : "";
+  html += logPager();
   let lastDay = null;
   for (const entry of page) {
     {
@@ -781,7 +805,7 @@ function entryListHtml(list) {
     }
     html += entryRow(entry);
   }
-  html += `</div><div class="row-between" style="margin-top:16px"><button class="btn ghost" data-act="previous" ${state.logPage === 0 ? "disabled" : ""}>${t("log.previous")}</button><span class="tiny">${t("log.page", { n: state.logPage + 1 })}</span><button class="btn ghost" data-act="more" ${state.logCursor ? "" : "disabled"}>${t("log.next")}</button></div>`;
+  html += `</div>${logPager()}`;
   return error + html;
 }
 
@@ -2330,7 +2354,7 @@ const crossing = createCrossingController({
 });
 
 const ACTIONS = {
-  "retry-log": () => loadEntries({ cursor: state.logPages[state.logPage], page: state.logPage }),
+  "retry-log": () => loadEntries({ page: state.logPage }),
   "entry-practice": async (node) => {
     const id = Number(node.dataset.id);
     closeOverlay();
