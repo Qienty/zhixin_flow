@@ -1741,3 +1741,12 @@ summary:focus-visible {
   body.gated .auth-intro .display { font-size: 32px; }
   body.gated .auth-intro .small { font-size: 16px; max-width: 34em; }
 }
+
+
+/* 手机端登录页试过两版压缩（去掉装饰插画 / 压成 64px 色带），
+   目的：让登录按钮在 375×667 与 360×640 上也落在首屏内。
+   实测能把按钮从 y≈690 提到 y≈469，但首屏的品牌画面被削弱，
+   最终按产品判断回到原始版式（128px 插画 + 8vh 上边距）。
+   代价：上述两种小屏上需轻微下滚才看到登录按钮。
+   如需恢复：在 @media (max-width: 600px) 内加回 auth-wrap / auth-intro /
+   auth-landscape / auth-card 的覆盖，以及矮屏那一段。 */
