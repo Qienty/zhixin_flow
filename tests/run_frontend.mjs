@@ -283,23 +283,30 @@ test("An old insights read cannot overwrite a newer AI analysis", async () => {
   assert.equal(a.hooks.state.insights.ai.summary, "new");
 });
 
-function expressionFixture({ account = { user: { id: 1 } }, confirm = true, create, changed, language = "zh" } = {}) {
-  const calls = [], downloads = [], messages = [];
+function expressionFixture({ account = { user: { id: 1 } }, confirm = true, create, changed, language = "zh", ai = { enabled: true, model: "test" }, clarifyExpression, nextSteps } = {}) {
+  const calls = [], downloads = [], messages = [], confirmed = [], wheelOpens = [], practiceOpens = [];
   const display = { html: "", closed: false, paints: [] };
   const context = vm.createContext({ crypto: webcrypto, Date, document: { documentElement: {}, querySelector: () => null } });
   vm.runInContext(plain(i18nSource) + '\n' + plain(expressionSource) + '\nglobalThis.make = createExpressionController;', context);
   context.setLang(language);
   const controller = context.make({
-    api: { createEntry: async payload => { calls.push(payload); return create ? create(payload) : { entry: { id: 1 } }; } },
+    api: {
+      createEntry: async payload => { calls.push(payload); return create ? create(payload) : { entry: { id: 1 } }; },
+      clarifyExpression: async text => { calls.push({ clarify: text }); if (!clarifyExpression) throw new Error("unexpected clarify"); return clarifyExpression(text); },
+      nextSteps: async text => { calls.push({ steps: text }); if (!nextSteps) throw new Error("unexpected next steps"); return nextSteps(text); },
+    },
     t: context.t, esc: text => String(text).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('\"', '&quot;'),
     getAccount: () => account, getEmotions: () => [{ key: "anxiety", label: "焦虑" }], tzOffset: () => 480,
     overlay: { querySelector: () => null }, open: html => { display.html = html; display.paints.push(html); }, close: () => { display.closed = true; },
-    confirm: async () => confirm, toast: message => messages.push(message), render() {},
+    confirm: async options => { confirmed.push(options && options.title); return confirm; },
+    toast: message => messages.push(message), render() {},
     changed: changed || (async () => {}), download: text => downloads.push(text),
+    getAI: () => ai, openWheel: () => wheelOpens.push(true), goPractice: () => practiceOpens.push(true),
   });
   const input = (key, value) => controller.input({ dataset: { expressionField: key }, value, closest: () => null });
   const emotion = value => controller.change({ matches: () => true, value });
-  return { controller, calls, downloads, messages, display, input, emotion };
+  const intent = value => controller.input({ dataset: { expressionIntent: "" }, value });
+  return { controller, calls, downloads, messages, display, input, emotion, intent, confirmed, wheelOpens, practiceOpens };
 }
 
 test("Guest expression, mode changes and downloads never upload content", async () => {
@@ -906,6 +913,80 @@ test("Service worker precaches every imported module and every entry exists on d
     const entry = "./js/" + spec.replace(/^\.\//, "");
     assert.ok(shell.includes(entry), `模块未被预缓存，离线冷启动会白屏：${spec}`);
   }
+});
+
+test("AI clarification needs consent, stays read-only until the user asks to fill", async () => {
+  const payload = { facts: "你开完会后一直没缓过来 <script>alert(1)</script>", needs: ["希望被听完", "不想被劝"],
+    emotion: "anxiety", question: "你最在意哪部分？", quota: { limit: 1, used: 1, remaining: 0 } };
+  const f = expressionFixture({ clarifyExpression: async () => payload });
+  f.input("text", "今天开会被否了，很难受");
+  await f.controller.handle("open");
+  await f.controller.handle("mode", { dataset: { mode: "clarify" } });
+  assert.ok(f.display.html.includes('data-act="e-clarify"'), "有 AI 时给出按钮");
+  assert.ok(f.display.html.includes("模型服务"), "按钮下面要说明会发送");
+
+  await f.controller.handle("clarify");
+  assert.equal(f.confirmed.length, 1, "每次调用前都要确认一次");
+  assert.deepEqual(f.calls, [{ clarify: "今天开会被否了，很难受" }]);
+  assert.ok(f.display.html.includes("你开完会后一直没缓过来"));
+  assert.ok(f.display.html.includes("&lt;script&gt;"), "模型输出必须转义");
+  assert.ok(!f.display.html.includes("<script>"), "模型输出不能当 HTML");
+  assert.ok(f.display.html.includes("今天的次数用完了"), "免费额度用完后给出提示");
+  assert.equal(f.calls.filter(call => call.emotion).length, 0, "AI 结果不能自己变成记录");
+
+  // 只读：没点「填进」之前，下载里只有正文，没有 AI 的整理结果
+  await f.controller.handle("download");
+  assert.ok(!f.downloads.at(-1).includes("你开完会后一直没缓过来"));
+  assert.ok(!f.downloads.at(-1).includes("希望被听完"));
+
+  // 点「填进整理框」才写入草稿
+  await f.controller.handle("ai-fill");
+  await f.controller.handle("download");
+  assert.ok(f.downloads.at(-1).includes("你开完会后一直没缓过来"));
+  assert.ok(f.downloads.at(-1).includes("希望被听完"));
+});
+
+test("Declining the AI consent sends nothing", async () => {
+  let called = 0;
+  const f = expressionFixture({ confirm: false, clarifyExpression: async () => { called++; return {}; } });
+  f.input("text", "今天很累");
+  await f.controller.handle("open");
+  await f.controller.handle("mode", { dataset: { mode: "clarify" } });
+  await f.controller.handle("clarify");
+  assert.equal(called, 0);
+  assert.equal(f.confirmed.length, 1);
+});
+
+test("Next-step mode offers local options first and asks AI only for written intent", async () => {
+  const f = expressionFixture({ nextSteps: async text => ({ steps: [{ text: "先走十分钟", practice_id: "" }], note: "愿意再做", quota: { limit: 1, used: 1, remaining: 0 } }) });
+  f.input("text", "今天很累");
+  await f.controller.handle("open");
+  await f.controller.handle("mode", { dataset: { mode: "next" } });
+  assert.ok(f.display.html.includes('data-act="e-wheel"'), "本地给转盘入口");
+  assert.ok(f.display.html.includes('data-act="e-practice"'), "本地给练习入口");
+
+  await f.controller.handle("wheel");
+  assert.equal(f.wheelOpens.length, 1);
+  assert.equal(f.calls.length, 0, "转盘不触发模型调用");
+
+  await f.controller.handle("steps");
+  assert.equal(f.calls.length, 0, "没写想做的事就不调用");
+
+  f.intent("想出门走十分钟");
+  await f.controller.handle("steps");
+  assert.deepEqual(f.calls, [{ steps: "想出门走十分钟" }]);
+  assert.ok(f.display.html.includes("先走十分钟"));
+});
+
+test("Without AI configured the two modes fall back to self-written prompts", async () => {
+  const f = expressionFixture({ ai: { enabled: false } });
+  f.input("text", "今天很累");
+  await f.controller.handle("open");
+  await f.controller.handle("mode", { dataset: { mode: "clarify" } });
+  assert.ok(!f.display.html.includes('data-act="e-clarify"'), "没配 AI 不显示按钮");
+  assert.ok(f.display.html.includes("没有配置 AI"));
+  assert.ok(f.display.html.includes('data-expression-field="facts"'), "整理框仍然可用");
+  assert.ok(f.display.html.includes('data-expression-field="need"'));
 });
 
 let failures = 0;

@@ -495,6 +495,124 @@ def analyze(entries: list[dict], days: int, lang: str, rules: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 表达空间：AI 整理与下一步建议
+# --------------------------------------------------------------------------- #
+
+CLARIFY_PROMPT = """你是 智心元流 的「帮我理清」助手。用户刚写下一段自己的感受，你要替他把这段话说清楚，让他不用再自己拆解。
+
+【不可越界】
+- 不做诊断、不做评估，不贴临床标签，不提药物、治疗、疗程、病理。
+- 不评判，不说教，不夸奖，不写「加油」「想开点」「要爱自己」这类空话。
+- 不编造用户没写的事实；不推测原因，只整理他说过的内容。
+- 不给解决方案，方案由用户自己决定。
+
+【要做的事】
+1. 用中性的话复述发生了什么（只写用户写过的）。
+2. 说出他可能希望被怎样对待，最多两条，用「你可能是希望…」的口吻，明确是猜测。
+3. 从候选情绪里挑一个最接近的，只给 key，不要解释。
+4. 给一个可以跳过的追问，帮他往下想一点。
+
+【输出】
+只输出一个 JSON 对象，不要代码块、不要多余字段：
+{"facts": "复述 1—2 句，不超过 120 字",
+ "needs": ["猜测的需要，每条不超过 40 字"],
+ "emotion": "候选里的 key，或空字符串",
+ "question": "一句追问，不超过 40 字"}
+文字必须使用 {lang_name}。"""
+
+NEXT_STEPS_PROMPT = """你是 智心元流 的「想想下一步」助手。用户刚写下一段感受，并说了自己想做点什么。给他 1—3 个今天就能做的小步骤。
+
+【不可越界】
+- 不做诊断、不做评估，不贴临床标签，不提药物、治疗、疗程、病理。
+- 不承诺效果，不说「你会好起来」。
+- 不安排用户做困难的事：每步都要具体、能在一天内完成、可以不做。
+- 不替用户决定，只给选项。
+
+【输出】
+只输出一个 JSON 对象，不要代码块、不要多余字段：
+{"steps": [{"text": "一步，不超过 60 字", "practice_id": "可选：从候选练习里选，否则空字符串"}],
+ "note": "一句提醒，可空"}
+步骤必须使用 {lang_name}。"""
+
+LANG_NAME = {"zh": "中文", "en": "English"}
+
+
+def _short(value, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _require_config() -> dict:
+    cfg = config()
+    if not cfg["enabled"]:
+        raise AIError("未配置 TETHER_AI_API_KEY")
+    return cfg
+
+
+def _reject_unsafe(data: dict) -> None:
+    term = safety_violation(data)
+    if term:
+        raise AIError(f"模型输出含临床表述「{term}」")
+
+
+def clarify(text: str, lang: str) -> dict:
+    """把用户刚写的一段话整理成结构化的四块。不落库、不缓存。"""
+    cfg = _require_config()
+    from .content import EMOTION_MAP
+
+    keys = list(EMOTION_MAP.keys())
+    messages = [
+        {"role": "system", "content": CLARIFY_PROMPT.replace("{lang_name}", LANG_NAME.get(lang, "中文"))},
+        {
+            "role": "user",
+            "content": f"用户写的内容：\n{text}\n\n候选情绪 key：{', '.join(keys)}",
+        },
+    ]
+    data = _parse_json(_chat(cfg, messages))
+    _reject_unsafe(data)
+
+    facts = _short(data.get("facts"), 120)
+    needs = [item for item in (_short(x, 40) for x in (data.get("needs") or []) if str(x).strip()) if item][:2]
+    emotion = _short(data.get("emotion"), 40)
+    if emotion not in EMOTION_MAP:
+        emotion = ""
+    question = _short(data.get("question"), 40)
+    if not facts and not needs:
+        raise AIError("模型没有给出整理结果")
+    return {"facts": facts, "needs": needs, "emotion": emotion, "question": question}
+
+
+def suggest_steps(text: str, lang: str) -> dict:
+    """针对「我想做点什么」，给出可跳过的小步骤。不落库、不缓存。"""
+    cfg = _require_config()
+    from .practices import PRACTICES
+
+    catalog = [{"id": pid, "title": (meta.get(lang) or meta.get("zh") or {}).get("title", pid)}
+               for pid, meta in PRACTICES.items()]
+    messages = [
+        {"role": "system", "content": NEXT_STEPS_PROMPT.replace("{lang_name}", LANG_NAME.get(lang, "中文"))},
+        {
+            "role": "user",
+            "content": "用户写的内容：\n" + text + "\n\n候选练习：" + json.dumps(catalog, ensure_ascii=False),
+        },
+    ]
+    data = _parse_json(_chat(cfg, messages))
+    _reject_unsafe(data)
+
+    steps = []
+    for item in data.get("steps") or []:
+        if not isinstance(item, dict):
+            continue
+        label = _short(item.get("text"), 60)
+        if not label:
+            continue
+        practice_id = _short(item.get("practice_id"), 40)
+        steps.append({"text": label, "practice_id": practice_id if practice_id in PRACTICES else ""})
+    if not steps:
+        raise AIError("模型没有给出可执行的小步骤")
+    return {"steps": steps[:3], "note": _short(data.get("note"), 80)}
+
+
+# --------------------------------------------------------------------------- #
 # 合并与缓存
 # --------------------------------------------------------------------------- #
 

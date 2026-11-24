@@ -14,6 +14,7 @@ from .helpers import _csv_cell, _dates, _normalize_time
 from .routes import meta  # noqa: F401  启动 / 首页 / 导入 / 健康 / 元数据
 from .routes import entries  # noqa: F401  情绪记录增删改查
 from .routes import interventions  # noqa: F401  引导内容、引导结果、就诊摘要、模型自检
+from .routes import expression_ai  # noqa: F401  表达空间的 AI 整理与下一步
 from .routes import practices  # noqa: F401  自助练习与每周证据卡
 from .routes import insights  # noqa: F401  统计、规则归因与 AI 分析
 from .routes import account  # noqa: F401  注册登录、兑换码、账号设置、危机资源

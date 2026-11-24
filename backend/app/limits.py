@@ -16,7 +16,7 @@ def setting(name, default, low=1, high=3600):
 class LimitError(Exception):
     """限流。reason 给接口层用来选本地化文案，message 只作兜底。"""
 
-    REASONS = {"in_flight", "cooldown", "capacity", "ip_window", "global_window"}
+    REASONS = {"in_flight", "cooldown", "capacity", "ip_window", "global_window", "daily"}
 
     def __init__(self, seconds, message="Too many requests. Please try again later.", reason=""):
         super().__init__(message)
@@ -29,6 +29,7 @@ _analysis_active = set()
 _analysis_starts = {}
 _registrations = {}
 _registration_global = []
+_daily_usage = {}
 
 
 def reset():
@@ -38,6 +39,40 @@ def reset():
         _analysis_starts.clear()
         _registrations.clear()
         _registration_global.clear()
+        _daily_usage.clear()
+
+
+def expression_attempt(user_id, plan, tz_offset=0, limit=1):
+    """免费账号每天 limit 次「让 AI 帮我理清」；Pro 不占这条额度。
+
+    按客户端本地日期计（同一套 tz_offset 语义），进程内计数，重启清零。
+    """
+    if plan == "pro":
+        return {"limit": None, "used": 0, "remaining": None}
+    now = time.time() + tz_offset * 60
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    with _lock:
+        if len(_daily_usage) >= 4096:
+            for key in [k for k, (stored, _) in _daily_usage.items() if stored != day]:
+                del _daily_usage[key]
+        stored, used = _daily_usage.get(user_id, (day, 0))
+        if stored != day:
+            used = 0
+        if used >= limit:
+            until_midnight = 86400 - (now % 86400)
+            raise LimitError(until_midnight, reason="daily")
+        _daily_usage[user_id] = (day, used + 1)
+        return {"limit": limit, "used": used + 1, "remaining": max(0, limit - used - 1)}
+
+
+def expression_refund(user_id, tz_offset=0):
+    """模型调用失败时把刚占掉的额度退回去，别让一次失败吃掉当天的机会。"""
+    now = time.time() + tz_offset * 60
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    with _lock:
+        stored, used = _daily_usage.get(user_id, (day, 0))
+        if stored == day and used > 0:
+            _daily_usage[user_id] = (day, used - 1)
 
 
 @contextmanager

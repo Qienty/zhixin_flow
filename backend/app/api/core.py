@@ -173,6 +173,7 @@ LIMIT_MESSAGES = {
         "capacity": "当前同时在跑的分析太多，请 {s} 秒后再试。",
         "ip_window": "尝试次数太多，请 {s} 秒后再试。",
         "global_window": "这一分钟注册请求过多，请 {s} 秒后再试。",
+        "daily": "今天的 AI 次数用完了，明天再来。还剩 {s} 秒。",
         "generic": "请求过于频繁，请 {s} 秒后再试。",
     },
     "en": {
@@ -181,6 +182,7 @@ LIMIT_MESSAGES = {
         "capacity": "Too many analyses are running right now. Try again in {s} seconds.",
         "ip_window": "Too many attempts. Try again in {s} seconds.",
         "global_window": "Too many sign-ups this minute. Try again in {s} seconds.",
+        "daily": "That was today's free AI run. You can try again tomorrow ({s} seconds).",
         "generic": "Too many requests. Try again in {s} seconds.",
     },
 }

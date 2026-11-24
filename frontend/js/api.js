@@ -170,6 +170,11 @@ export const api = {
     call(`/api/entries/${id}/intervention`, { method: "POST", body: payload }),
 
   aiSelftest: () => call("/api/ai/selftest", { method: "POST", timeout: 60000 }),
+  /* 表达空间的两次 AI 调用：服务端只读一次，不落库 */
+  clarifyExpression: (text, signal) =>
+    call("/api/expression/clarify", { method: "POST", body: { text }, signal, timeout: 120000 }),
+  nextSteps: (text, signal) =>
+    call("/api/expression/next-steps", { method: "POST", body: { text }, signal, timeout: 120000 }),
   stats: () => call("/api/stats/basic"),
   /* 就诊摘要：规则计算，不调用模型；窗口 14 / 30 / 90 天 */
   handoff: (days) => call("/api/handoff", { params: { days } }),

@@ -55,6 +55,8 @@ class ReviewFixes(unittest.TestCase):
             ('POST', r'^/api/entries/(?P<entry_id>\d+)/intervention$'),
             ('GET', '^/api/handoff$'),
             ('POST', '^/api/ai/selftest$'),
+            ('POST', '^/api/expression/clarify$'),
+            ('POST', '^/api/expression/next-steps$'),
             ('GET', '^/api/practices$'),
             ('POST', '^/api/practice-sessions$'),
             ('GET', '^/api/practice-sessions$'),
@@ -89,6 +91,103 @@ class ReviewFixes(unittest.TestCase):
         for name in ('Request', 'Response', 'dispatch', 'parse_query', 'ApiError', 'PUBLIC_PATHS',
                      'WINDOW_DAYS', 'router', '_dates', '_normalize_time', '_csv_cell'):
             self.assertTrue(hasattr(api, name), name)
+
+    def test_expression_ai_requires_login_and_validates_text(self):
+        body = json.dumps({'text': '今天很累'}).encode()
+        unauth = api.Request('POST', '/api/expression/clarify', {'tz_offset': ['480']}, body, {})
+        self.assertEqual(api.dispatch(unauth).status, 401)
+        for payload in ({}, {'text': ''}, {'text': '   '}, {'text': 123}, {'text': ['x']}):
+            with self.subTest(payload=payload):
+                self.assertIn(self.request('POST', '/api/expression/clarify', payload).status, (400, 422))
+        overflow = {'text': '字' * 501}
+        self.assertEqual(self.request('POST', '/api/expression/clarify', overflow).status, 422)
+        self.assertEqual(self.request('POST', '/api/expression/next-steps', overflow).status, 422)
+
+    def test_expression_ai_disabled_returns_503_without_writing(self):
+        before = self.scalar('SELECT COUNT(*) FROM entries')
+        with patch.object(ai, 'config', return_value={'enabled': False, 'model': 'test'}):
+            self.assertEqual(self.request('POST', '/api/expression/clarify', {'text': '今天很累'}).status, 503)
+            self.assertEqual(self.request('POST', '/api/expression/next-steps', {'text': '想走走'}).status, 503)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM entries'), before)
+
+    def test_expression_clarify_free_account_gets_one_run_per_day(self):
+        stored = {'facts': '你开完会后一直没缓过来', 'needs': ['希望被听完'], 'emotion': 'anxious', 'question': '你最在意哪部分？'}
+        entries_before = self.scalar('SELECT COUNT(*) FROM entries')
+        with patch.object(ai, 'config', return_value={'enabled': True, 'model': 'test'}), \
+                patch.object(ai, 'clarify', return_value=dict(stored)) as model:
+            first = self.request('POST', '/api/expression/clarify', {'text': '今天开会被否了，很难受'})
+            self.assertEqual(first.status, 200)
+            self.assertEqual(first.payload['facts'], stored['facts'])
+            self.assertEqual(first.payload['quota'], {'limit': 1, 'used': 1, 'remaining': 0})
+            second = self.request('POST', '/api/expression/clarify', {'text': '再来一次'})
+            self.assertEqual(second.status, 429)
+            self.assertIn('Retry-After', second.headers)
+            self.assertEqual(model.call_count, 1)
+        # 只读一次：不写记录、不写缓存
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM entries'), entries_before)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM ai_cache'), 0)
+
+    def test_expression_ai_failure_returns_502_and_refunds_the_run(self):
+        with patch.object(ai, 'config', return_value={'enabled': True, 'model': 'test'}), \
+                patch.object(ai, 'clarify', side_effect=ai.AIError('模型接口连不上')):
+            failed = self.request('POST', '/api/expression/clarify', {'text': '今天很累'})
+            self.assertEqual(failed.status, 502)
+        # 失败不吃掉当天的额度（限流层直接验证，避开 60 秒冷却）
+        uid = self.users[0]['id']
+        limits.reset()
+        limits.expression_attempt(uid, 'free', 480)
+        with self.assertRaises(limits.LimitError):
+            limits.expression_attempt(uid, 'free', 480)
+        limits.expression_refund(uid, 480)
+        self.assertEqual(limits.expression_attempt(uid, 'free', 480)['used'], 1)
+
+    def test_expression_ai_pro_skips_daily_quota_but_keeps_cooldown(self):
+        auth.update_user(self.users[0]['id'], plan='pro')
+        result = {'facts': 'f', 'needs': [], 'emotion': '', 'question': ''}
+        with patch.object(ai, 'config', return_value={'enabled': True, 'model': 'test'}), \
+                patch.object(ai, 'clarify', return_value=dict(result)) as model:
+            first = self.request('POST', '/api/expression/clarify', {'text': 'a'})
+            self.assertEqual(first.status, 200)
+            self.assertEqual(first.payload['quota'], {'limit': None, 'used': 0, 'remaining': None})
+            self.assertEqual(self.request('POST', '/api/expression/clarify', {'text': 'b'}).status, 429)
+            self.assertEqual(model.call_count, 1)
+
+    def test_expression_next_steps_returns_quota_and_passes_steps_through(self):
+        suggestion = {'steps': [{'text': '先走十分钟', 'practice_id': 'grounding'}], 'note': '不想做也可以不做'}
+        with patch.object(ai, 'config', return_value={'enabled': True, 'model': 'test'}), \
+                patch.object(ai, 'suggest_steps', return_value=suggestion):
+            result = self.request('POST', '/api/expression/next-steps', {'text': '我想做点什么'})
+        self.assertEqual(result.status, 200)
+        self.assertEqual(result.payload['steps'][0]['practice_id'], 'grounding')
+        self.assertEqual(result.payload['quota']['used'], 1)
+
+    def test_ai_clarify_and_steps_validate_model_output(self):
+        clarify_raw = json.dumps({'facts': '你开完会后一直没缓过来', 'needs': ['希望被听完'],
+                                  'emotion': 'not-a-real-emotion', 'question': '你最在意哪部分？'})
+        with patch.object(ai, 'config', return_value={'enabled': True, 'model': 'm'}), \
+                patch.object(ai, '_chat', return_value=clarify_raw):
+            clarified = ai.clarify('今天开会被否了', 'zh')
+        self.assertEqual(clarified['emotion'], '', '未知情绪 key 必须清空')
+        self.assertEqual(clarified['needs'], ['希望被听完'])
+
+        steps_raw = json.dumps({'steps': [{'text': '走十分钟', 'practice_id': 'grounding'},
+                                          {'text': '写一行', 'practice_id': 'not-a-practice'}], 'note': 'ok'})
+        with patch.object(ai, 'config', return_value={'enabled': True, 'model': 'm'}), \
+                patch.object(ai, '_chat', return_value=steps_raw):
+            steps = ai.suggest_steps('想做点什么', 'zh')
+        self.assertEqual([s['practice_id'] for s in steps['steps']], ['grounding', ''])
+
+        # 临床表述整份拒绝
+        for prompt_text in ({'facts': '这属于抑郁症', 'needs': [], 'emotion': '', 'question': ''},
+                            {'steps': [{'text': '你可能需要药物治疗', 'practice_id': ''}], 'note': ''}):
+            with self.subTest(output=prompt_text):
+                with patch.object(ai, 'config', return_value={'enabled': True, 'model': 'm'}), \
+                        patch.object(ai, '_chat', return_value=json.dumps(prompt_text)):
+                    with self.assertRaises(ai.AIError):
+                        if 'steps' in prompt_text:
+                            ai.suggest_steps('x', 'zh')
+                        else:
+                            ai.clarify('x', 'zh')
 
     def test_wheel_types_reject_atomically(self):
         baseline = self.request('PUT', '/api/wheel', {'items': ['walk', 'rest']}).payload['items']

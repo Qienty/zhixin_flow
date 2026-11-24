@@ -15,6 +15,11 @@
 .expression-mode.on { background: var(--moss-tint); border-color: var(--moss); color: var(--ink); font-weight: 600; }
 .expression-mode:focus-visible, .expression-save summary:focus-visible { outline: 2px solid var(--moss); outline-offset: 3px; }
 .expression-prompts { border-left: 2px solid var(--line-strong); padding-left: 14px; }
+/* AI 整理结果：只读卡片，与用户自己的输入区分开 */
+.expression-ai-result { padding: 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-soft); }
+.expression-ai-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: var(--ink); }
+.expression-manual { padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: 14px; }
+.expression-manual summary { cursor: pointer; color: var(--ink-2); }
 .expression-save { padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-soft); }
 .expression-save summary { cursor: pointer; line-height: 1.6; }
 .expression-save[open] summary { margin-bottom: 16px; }

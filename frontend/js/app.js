@@ -2258,6 +2258,9 @@ const practice = createPracticeController({
 const expression = createExpressionController({
   api, t, esc, tzOffset, overlay, open: openOverlay, close: closeOverlay, confirm: askConfirm, toast, render,
   getAccount: () => state.account, getEmotions: () => state.meta?.emotions || [], changed: entriesChanged,
+  getAI: () => (state.meta && state.meta.ai) || {},
+  openWheel: () => openWheel(),
+  goPractice: () => nav("practice"),
   download: (text) => {
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
     const link = document.createElement("a");
