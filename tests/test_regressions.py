@@ -149,173 +149,6 @@ class Regressions(unittest.TestCase):
         self.assertEqual(response.status, 409)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM ai_cache"), 0)
 
-    def test_expression_translation_requires_login_and_validates_payload(self):
-        body = {"text": "I feel a little unsure.", "target_lang": "zh", "mode": "space"}
-        unauthenticated = api.Request("POST", "/api/expression/translate", {}, json.dumps(body).encode(), {})
-        self.assertEqual(api.dispatch(unauthenticated).status, 401)
-
-        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}):
-            invalid_target = self.request("POST", "/api/expression/translate", {**body, "target_lang": "fr"})
-            too_long = self.request("POST", "/api/expression/translate", {**body, "text": "x" * 501})
-            invalid_mode = self.request("POST", "/api/expression/translate", {**body, "mode": "diagnose"})
-        self.assertEqual(invalid_target.status, 400)
-        self.assertEqual(too_long.status, 422)
-        self.assertEqual(invalid_mode.status, 400)
-
-    def test_expression_translation_is_explicit_and_never_persisted(self):
-        body = {"text": "I feel a little unsure.", "target_lang": "zh", "mode": "clarify", "emotion": "anxiety"}
-        result = {"text": "我有点拿不准。", "target_lang": "zh", "intent": "share", "cultural_notes": [], "safety": "ok"}
-        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
-                patch.object(ai, "rewrite_expression", return_value=result) as rewrite:
-            response = self.request("POST", "/api/expression/translate", body)
-        self.assertEqual(response.status, 200)
-        self.assertEqual(response.payload, result)
-        rewrite.assert_called_once_with(
-            body["text"], "zh", emotion="anxiety", mode="clarify",
-            scene="", tone="polite", relation="peer", details={},
-        )
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM entries"), 0)
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM ai_cache"), 0)
-
-    def test_expression_translation_returns_service_unavailable_when_ai_is_disabled(self):
-        body = {"text": "I feel a little unsure.", "target_lang": "zh"}
-        with patch.object(ai, "rewrite_expression") as rewrite:
-            response = self.request("POST", "/api/expression/translate", body)
-        self.assertEqual(response.status, 503)
-        rewrite.assert_not_called()
-
-    def test_expression_translation_model_failure_is_a_soft_api_error(self):
-        body = {"text": "I feel a little unsure.", "target_lang": "zh"}
-        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
-                patch.object(ai, "rewrite_expression", side_effect=ai.AIError("provider timeout")):
-            response = self.request("POST", "/api/expression/translate", body)
-        self.assertEqual(response.status, 502)
-        self.assertIn("provider timeout", response.payload["error"])
-
-    def test_expression_scene_validates_fields_and_builds_a_sendable_message(self):
-        base = {"target_lang": "en", "scene": "deadline", "tone": "polite", "relation": "professor",
-                "details": {"what": "初稿", "when": "周五", "want": "下周三", "extra": "分析还要时间"}}
-        result = {"text": "Dear Prof. Lee, could I move the draft?", "target_lang": "en", "intent": "ask_advice",
-                  "cultural_notes": ["先给结论"], "alternatives": [{"tone": "direct", "text": "Hi Prof. Lee — could I move it?"}],
-                  "safety": "ok"}
-        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
-                patch.object(ai, "rewrite_expression", return_value=result) as rewrite:
-            response = self.request("POST", "/api/expression/translate", base)
-            # A scene may send details with no free text at all. Another account
-            # keeps the per-account model cooldown out of this assertion.
-            blank_text = self.request("POST", "/api/expression/translate", {**base, "text": ""}, user=1)
-        self.assertEqual(response.status, 200, response.payload)
-        self.assertEqual(response.payload["alternatives"][0]["tone"], "direct")
-        self.assertEqual(blank_text.status, 200, blank_text.payload)
-        rewrite.assert_called_with(
-            "", "en", emotion="", mode="space", scene="deadline", tone="polite",
-            relation="professor", details={"what": "初稿", "when": "周五", "want": "下周三", "extra": "分析还要时间"},
-        )
-
-    def test_expression_scene_rejects_unknown_values_and_empty_requests(self):
-        base = {"target_lang": "en", "scene": "deadline", "details": {"what": "x"}}
-        cases = [
-            {**base, "scene": "promotion"},
-            {**base, "tone": "rude"},
-            {**base, "relation": "boss"},
-            {**base, "details": {"budget": "100"}},
-            {**base, "details": {"what": "x" * 201}},
-            {"target_lang": "en"},
-            {"target_lang": "en", "scene": "deadline", "details": {}},
-        ]
-        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
-                patch.object(ai, "rewrite_expression") as rewrite:
-            for body in cases:
-                self.assertEqual(self.request("POST", "/api/expression/translate", body).status, 400, body)
-        rewrite.assert_not_called()
-
-    def test_expression_scene_alternatives_are_validated_and_bounded(self):
-        raw = {
-            "text": "Could I move the draft to next Wednesday?",
-            "intent": "ask_advice",
-            "cultural_notes": ["a", "b", "c"],
-            "alternatives": [
-                {"tone": "direct", "text": "Hi — move the draft to Wednesday?"},
-                {"tone": "polite", "text": "Could I move the draft to next Wednesday?"},
-                {"tone": "rude", "text": "Move it."},
-                {"tone": "close", "text": "Could I move the draft to next Wednesday?"},
-                {"tone": "close", "text": "Any chance the draft could slip to Wednesday?"},
-                {"tone": "close", "text": "I think this is a diagnosis of my anxiety."},
-            ],
-            "safety": "ok",
-        }
-        validated = ai._validate_expression(raw, "en")
-        self.assertEqual(len(validated["alternatives"]), 2)
-        self.assertEqual(validated["alternatives"][0]["tone"], "direct")
-        self.assertEqual(validated["alternatives"][1]["text"], "Any chance the draft could slip to Wednesday?")
-        self.assertEqual(len(validated["cultural_notes"]), 2)
-        self.assertEqual(validated["target_lang"], "en")
-
-    def test_expression_interpret_requires_login_and_validates_payload(self):
-        body = {"text": "Could you be more careful next time?", "source_lang": "en", "target_lang": "zh"}
-        unauthenticated = api.Request("POST", "/api/expression/interpret", {}, json.dumps(body).encode(), {})
-        self.assertEqual(api.dispatch(unauthenticated).status, 401)
-        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}):
-            cases = [
-                {"text": ""},
-                {"text": "x" * 501},
-                {**body, "source_lang": "fr"},
-                {**body, "target_lang": "de"},
-                {**body, "relation": "boss"},
-            ]
-            for item in cases:
-                result = self.request("POST", "/api/expression/interpret", item)
-                self.assertIn(result.status, (400, 422), item)
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM entries"), 0)
-
-    def test_expression_interpret_is_a_reading_and_never_persisted(self):
-        body = {"text": "Could you be more careful next time?", "source_lang": "en", "target_lang": "zh", "relation": "manager"}
-        result = {"meaning": "对方希望你下次更注意", "tone": "tense", "subtext": "可能对上次的事还没放下（不确定）",
-                  "replies": [{"tone": "polite", "text": "明白，下次我会先确认。"}], "cultural_notes": ["这句话在英语里偏直接"],
-                  "target_lang": "zh", "safety": "ok"}
-        with patch.object(ai, "config", return_value={"enabled": True, "model": "test"}), \
-                patch.object(ai, "interpret_message", return_value=result) as interpret:
-            response = self.request("POST", "/api/expression/interpret", body)
-        self.assertEqual(response.status, 200, response.payload)
-        self.assertEqual(response.payload, result)
-        interpret.assert_called_once_with(body["text"], source_lang="en", target_lang="zh", relation="manager")
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM entries"), 0)
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM ai_cache"), 0)
-
-    def test_expression_interpret_returns_service_unavailable_when_ai_is_disabled(self):
-        body = {"text": "Could you be more careful next time?", "source_lang": "en", "target_lang": "zh"}
-        with patch.object(ai, "interpret_message") as interpret:
-            response = self.request("POST", "/api/expression/interpret", body)
-        self.assertEqual(response.status, 503)
-        interpret.assert_not_called()
-
-    def test_interpretation_output_separates_guesswork_and_rejects_clinical_terms(self):
-        raw = {
-            "meaning": "对方在提一个具体的请求",
-            "tone": "weird",
-            "subtext": "可能有点不满（不确定）",
-            "replies": [
-                {"tone": "polite", "text": "明白，下次我先确认。"},
-                {"tone": "rude", "text": "drop this"},
-                {"tone": "direct", "text": "x" * 601},
-                {"tone": "close", "text": "收到，下次注意。"},
-                {"tone": "polite", "text": "我明白。"},
-            ],
-            "cultural_notes": ["a", "b", "c"],
-        }
-        validated = ai._validate_interpretation(raw, "zh")
-        self.assertEqual(validated["tone"], "ambiguous")
-        self.assertEqual([reply["tone"] for reply in validated["replies"]], ["polite", "close"])
-        self.assertEqual(len(validated["cultural_notes"]), 2)
-        self.assertEqual(validated["target_lang"], "zh")
-        for broken in (
-            {**raw, "subtext": "这可能是抑郁症的前兆"},
-            {**raw, "replies": [{"tone": "polite", "text": "建议你去做个诊断"}]},
-            {**raw, "meaning": ""},
-        ):
-            with self.assertRaises(ai.AIError):
-                ai._validate_interpretation(broken, "zh")
-
     def test_ai_config_exposes_provider_and_fallback_without_secrets(self):
         env = {
             "TETHER_AI_API_KEY": "sk-test-value", "TETHER_AI_BASE_URL": "https://api.deepseek.com/v1",
@@ -477,6 +310,37 @@ class Regressions(unittest.TestCase):
         request = api.Request("GET", "/api/account", {}, b"", {"authorization": "Bearer " + "a" * 43})
         request.client_ip = "test-client"
         self.assertEqual(api.dispatch(request).status, 401)
+
+    def test_handoff_summary_is_rule_based_and_scoped_to_the_account(self):
+        """就诊摘要：规则计算、不调用模型、只含当前账号的数据。"""
+        for _ in range(3):
+            self.request("POST", "/api/entries", self.entry(severity=4, cause="被临时加需求，晚上要赶出来"))
+        with patch.object(ai, "analyze", side_effect=AssertionError("handoff must not call a model")):
+            response = self.request("GET", "/api/handoff", query={"tz_offset": ["480"], "days": ["30"]})
+        self.assertEqual(response.status, 200, response.payload)
+        data = response.payload
+        self.assertEqual(data["days"], 30)
+        self.assertEqual(data["entries"]["entries"], 3)
+        self.assertGreaterEqual(data["entries"]["severe_count"], 3)
+        self.assertTrue(data["entries"]["top_causes"])
+        self.assertTrue(data["hours"])
+        self.assertIn("week", data)
+        self.assertIn("practices", data)
+        self.assertTrue(data["notes"])
+        self.assertIn("generated_at", data)
+        # 另一个账号看不到这些记录
+        other = self.request("GET", "/api/handoff", user=1, query={"tz_offset": ["480"]})
+        self.assertEqual(other.payload["entries"]["entries"], 0)
+
+    def test_handoff_windows_snap_to_supported_values(self):
+        with patch.object(ai, "analyze") as rewrite:
+            for requested, expected in ((14, 14), (30, 30), (90, 90), (45, 30), (1, 14), (365, 90)):
+                result = self.request("GET", "/api/handoff", query={"days": [str(requested)]})
+                self.assertEqual(result.status, 200)
+                self.assertEqual(result.payload["days"], expected, requested)
+        rewrite.assert_not_called()
+        unauthenticated = api.Request("GET", "/api/handoff", {}, b"", {})
+        self.assertEqual(api.dispatch(unauthenticated).status, 401)
 
     def test_legacy_cache_migration_preserves_records(self):
         self.request("POST", "/api/entries", self.entry())

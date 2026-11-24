@@ -168,13 +168,11 @@ export const api = {
   intervention: (emotion) => call(`/api/interventions/${emotion}`),
   recordIntervention: (id, payload) =>
     call(`/api/entries/${id}/intervention`, { method: "POST", body: payload }),
-  translateExpression: (payload, signal) =>
-    call("/api/expression/translate", { method: "POST", body: payload, signal, timeout: 120000 }),
-  interpretMessage: (payload, signal) =>
-    call("/api/expression/interpret", { method: "POST", body: payload, signal, timeout: 120000 }),
-  aiSelftest: () => call("/api/ai/selftest", { method: "POST", timeout: 60000 }),
 
+  aiSelftest: () => call("/api/ai/selftest", { method: "POST", timeout: 60000 }),
   stats: () => call("/api/stats/basic"),
+  /* 就诊摘要：规则计算，不调用模型；窗口 14 / 30 / 90 天 */
+  handoff: (days) => call("/api/handoff", { params: { days } }),
   weeklyCard: () => call("/api/weekly-card"),
   insights: () => call("/api/insights"),
   /* 唯一会阻塞几秒的接口：让模型重写这一屏的结论 */

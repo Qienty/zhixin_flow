@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from . import db, pragmatics
+from . import db
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 
@@ -194,54 +194,6 @@ facts 里的数字是代码算出来的，是唯一可信的数据源：
 数量必须与 facts 对齐：patterns 覆盖 facts.patterns 全部条目，efficacy 覆盖 facts.efficacy 全部条目。
 facts 里没有 trend / peak / efficacy 时，对应字段给空字符串或空数组，不要虚构。
 focus.why 只讲理由，不要重复「先看这条」「最值得关注」这类标签——界面上已经有这个标签了。"""
-
-
-# 这是跨境表达的窄场景能力：把用户自己的话转换成另一种语言时，
-# 保留语气、边界和不确定性，不替用户补充事实，也不自动替用户发送。
-EXPRESSION_SYSTEM_PROMPT = """你是智心元流的跨语言表达编辑器。你的任务是把用户写下的日常感受改写成另一种语言，帮助跨文化生活中的用户向当地朋友、老师或支持人员表达自己。
-
-规则：
-- 只处理表达，不做诊断、治疗建议或危机判断；不要添加用户没有说过的事实。
-- 保留第一人称、情绪强度、不确定性和边界。用户说“我不确定”，不能改成确定结论。
-- 目标语言要自然、简洁、尊重当地日常表达；不要逐字翻译成生硬的句子，也不要使用俚语、过度亲密称呼或文化假设。
-- 根据 mode 保留沟通意图：space=只想表达，clarify=希望对方理解，next=想讨论下一步。
-- 如果原文包含请求被倾听、需要空间或希望得到建议的边界，要明确保留。
-- 输出只能是 JSON，不要代码块，不要解释：
-{"text":"改写后的正文","intent":"share|ask_listening|ask_space|ask_advice|unclear","cultural_notes":["最多两条简短说明"],"safety":"ok"}
-- cultural_notes 只在确实有帮助时填写，例如语气变得更直接或保留了“暂时不想要建议”的边界；没有说明时返回空数组。
-
-当 payload 带 scene 时，你不再是逐字改写，而是写一条可以直接发出去的消息：
-- 按 scene_guide 给的结构组织段落，details 里的事实照用，不许编造时间、原因或承诺。
-- relation 决定称谓与敬语层级：professor / manager / client 用正式称谓和缓冲句；peer 是同级的同事或同学；friend 是熟人朋友的口语。
-- tone 决定直接程度：polite 保留缓冲与致意；direct 结论前置、少绕弯；close 口语、亲近但不越界。
-- 必须再给 1 条 alternatives，用于换一种语气；它的 tone 与主版本不同，内容仍受同样的规则约束。
-- 输出仍然只能是 JSON：
-{"text":"主版本","intent":"share|ask_listening|ask_space|ask_advice|unclear","cultural_notes":["最多两条简短说明"],"alternatives":[{"tone":"polite|direct|close","text":"备选版本"}],"safety":"ok"}
-
-当 payload 带 pragmatics 时，那四个维度（directness / honorific / face_cost / conclusion_position）和目标语言的 guidance 就是本次写作的硬约束：
-- 按维度调整句子结构和敬语层级，不要套用你对某个国家文化的刻板印象，也不要添加 payload 里没有的事实。
-- conclusion_position 决定结论出现在第几句：early=第一句，after_context=先交代背景，late=请求放最后。
-- 维度之间冲突时，以 relation（收件人）为优先，其次 tone。
-"""
-
-EXPRESSION_SCENES = ("deadline", "decline", "apologize", "ask_help", "conflict", "bad_news", "negotiate", "boundary")
-# 语气与对象只在这里定义一次：四维语用表是唯一来源。
-EXPRESSION_TONES = tuple(pragmatics.TONES)
-EXPRESSION_RELATIONS = tuple(pragmatics.RELATIONS)
-EXPRESSION_DETAILS = ("what", "when", "want", "extra")
-
-# 每个场景只交代「先说哪一句、别说什么」。事实仍由用户填写，
-# 模型负责把它们排成对方语言里说得出口的顺序。
-SCENE_GUIDE = {
-    "deadline": "说明来意 → 原定时间 → 希望改到的时间 → 一句承诺或补救。新时间要具体；不要用一段辩解代替请求，也不要反复道歉。",
-    "decline": "先给明确的结论（这次不行），再给一句简短理由，最后给一个可选的替代方案。不要用「可能之后吧」这类模糊承诺拖住对方。",
-    "apologize": "承认具体行为 → 说明影响 → 给出补救。不要用「如果你觉得不舒服」这类条件式道歉，也不要把责任推给客观情况。",
-    "ask_help": "说清具体要什么帮助 → 需要的时间 → 为什么找对方。请求要小到对方能直接回答，不要用自我贬低换取同情。",
-    "conflict": "描述发生了什么（事实）→ 自己的感受 → 具体请求（希望对方以后怎么做）。不要用「你总是」这类指责句式，也不要替对方下结论。",
-    "bad_news": "结论先行 → 影响范围 → 已经做的应对 → 下一步。不要把坏消息埋在长铺垫后面。",
-    "negotiate": "说清自己的价值或处境 → 具体请求 → 可以接受的替代方案。避免威胁式或最后通牒式措辞。",
-    "boundary": "用「我需要」表达边界 → 一个具体可执行的安排。不要用「你从来」开头，也不要解释过多。",
-}
 
 
 # --------------------------------------------------------------------------- #
@@ -542,188 +494,6 @@ def analyze(entries: list[dict], days: int, lang: str, rules: dict) -> dict:
     return _validate(narrative, rules)
 
 
-EXPRESSION_INTENTS = {"share", "ask_listening", "ask_space", "ask_advice", "unclear"}
-
-
-def _validate_expression(result: dict, target_lang: str) -> dict:
-    """Validate the small structured response used by the cross-language editor."""
-    if not isinstance(result, dict):
-        raise AIError("模型输出不是对象")
-    text = str(result.get("text") or "").strip()
-    if not text:
-        raise AIError("模型没有给出改写内容")
-    if len(text) > 1200:
-        raise AIError("模型改写内容过长")
-    term = safety_violation({"text": text, "cultural_notes": result.get("cultural_notes") or []})
-    if term:
-        raise AIError(f"模型输出含临床表述「{term}」，已拒绝显示")
-    intent = str(result.get("intent") or "unclear").strip()
-    if intent not in EXPRESSION_INTENTS:
-        intent = "unclear"
-    notes = []
-    for note in result.get("cultural_notes") or []:
-        value = str(note).strip()
-        if value:
-            notes.append(value[:160])
-    alternatives = []
-    for item in result.get("alternatives") or []:
-        if not isinstance(item, dict):
-            continue
-        alt_text = str(item.get("text") or "").strip()
-        alt_tone = str(item.get("tone") or "").strip().lower()
-        if not alt_text or alt_text == text or len(alt_text) > 1200 or alt_tone not in EXPRESSION_TONES:
-            continue
-        if safety_violation({"text": alt_text}):
-            continue
-        alternatives.append({"tone": alt_tone, "text": alt_text})
-        if len(alternatives) == 2:
-            break
-    return {
-        "text": text,
-        "target_lang": target_lang,
-        "intent": intent,
-        "cultural_notes": notes[:2],
-        "alternatives": alternatives,
-        "safety": "ok",
-    }
-
-
-def rewrite_expression(
-    text: str,
-    target_lang: str,
-    emotion: str = "",
-    mode: str = "space",
-    scene: str = "",
-    tone: str = "polite",
-    relation: str = "peer",
-    details: dict | None = None,
-) -> dict:
-    """Convert a user's own words for a cross-language conversation.
-
-    The caller must have obtained explicit user intent before invoking this function.
-    The source text is sent only for this request and is not persisted by this module.
-
-    When ``scene`` is one of EXPRESSION_SCENES the model writes a sendable message
-    for that situation instead of translating a diary line.
-    """
-    cfg = config()
-    if not cfg["enabled"]:
-        raise AIError("未配置 AI 服务：请先配置 TETHER_AI_API_KEY")
-    language = pragmatics.model_name(target_lang)
-    payload = {
-        "source_text": text[:500],
-        "target_language": language,
-        "emotion": emotion[:40],
-        "mode": mode if mode in ("space", "clarify", "next") else "space",
-    }
-    if scene in EXPRESSION_SCENES:
-        payload["scene"] = scene
-        payload["scene_guide"] = SCENE_GUIDE[scene]
-        payload["tone"] = tone if tone in EXPRESSION_TONES else "polite"
-        payload["relation"] = relation if relation in EXPRESSION_RELATIONS else "peer"
-        payload["details"] = {
-            key: str(value)[:200]
-            for key, value in (details or {}).items()
-            if key in EXPRESSION_DETAILS and str(value).strip()
-        }
-    # 四维语用事实：模型照着写，不再自己猜目标文化的习惯。
-    payload["pragmatics"] = pragmatics.plan(
-        target_lang,
-        payload.get("tone", "") if scene in EXPRESSION_SCENES else "",
-        payload.get("relation", "") if scene in EXPRESSION_SCENES else "",
-    )
-    messages = [
-        {"role": "system", "content": EXPRESSION_SYSTEM_PROMPT},
-        {"role": "user", "content": "请处理以下 JSON，不要添加事实：\n" + json.dumps(payload, ensure_ascii=False)},
-    ]
-    return _validate_expression(_parse_json(_chat(cfg, messages)), target_lang)
-
-
-# --------------------------------------------------------------------------- #
-# 反向：听懂对方说了什么
-# --------------------------------------------------------------------------- #
-
-# 解读一句话的语气，比改写更容易越界：模型会忍不住替对方下结论。
-# 所以输出被拆成「字面」「语气档」「可能的潜台词」三块，且必须带不确定标记。
-INTERPRET_TONES = ("warm", "neutral", "tense", "harsh", "ambiguous")
-
-INTERPRET_SYSTEM_PROMPT = """你是跨语言沟通的解读助手。用户收到了一句用非母语（或母语）写来的话，想知道它大概是什么意思、语气有多重、可以怎么回。
-
-规则：
-- 只解读这句话本身，不补充用户没有提供的信息，不推断对方的人格、动机或关系状态。
-- 严格区分「字面」和「推测」：meaning 只写这句话字面上在说什么；subtext 写「可能是」，并且必须带不确定性，不能写成结论。
-- 不评价用户，不建议对方应该怎么做；不做诊断、不建议治疗、不贴临床标签。
-- 给 1—2 个可直接复制发送的回复，语气档位不同（polite / direct / close），长度不超过 600 字符；回复里不能添加用户没有说过的事实。
-- 如果这句话本身包含威胁、自伤或危机信息，不要解读潜台词，只提示「这句话可能涉及安全风险，建议直接确认对方状态并联系当地支持资源」。
-- 输出只能是 JSON，不要代码块，不要解释：
-{"meaning":"字面上说了什么","tone":"warm|neutral|tense|harsh|ambiguous","subtext":"可能的潜台词（带不确定）","replies":[{"tone":"polite|direct|close","text":"可直接回复"}],"cultural_notes":["最多两条"],"safety":"ok"}
-"""
-
-
-def _validate_interpretation(result: dict, target_lang: str) -> dict:
-    """校验「听懂对方」的输出：拆开事实与推测，回复逐条过安全扫描。"""
-    if not isinstance(result, dict):
-        raise AIError("模型输出不是对象")
-    meaning = str(result.get("meaning") or "").strip()
-    if not meaning:
-        raise AIError("模型没有给出字面意思")
-    if len(meaning) > 400:
-        raise AIError("模型解读过长")
-    tone = str(result.get("tone") or "").strip().lower()
-    if tone not in INTERPRET_TONES:
-        tone = "ambiguous"
-    subtext = str(result.get("subtext") or "").strip()[:400]
-    notes = [str(note).strip()[:160] for note in (result.get("cultural_notes") or []) if str(note).strip()][:2]
-    replies = []
-    for item in result.get("replies") or []:
-        if not isinstance(item, dict):
-            continue
-        reply_text = str(item.get("text") or "").strip()
-        reply_tone = str(item.get("tone") or "").strip().lower()
-        if not reply_text or len(reply_text) > 600 or reply_tone not in EXPRESSION_TONES:
-            continue
-        replies.append({"tone": reply_tone, "text": reply_text})
-        if len(replies) == 2:
-            break
-    # 解读和回复都是会被用户直接看/直接发的文本，任何一处越界整条拒绝。
-    term = safety_violation({"meaning": meaning, "subtext": subtext, "replies": replies, "cultural_notes": notes})
-    if term:
-        raise AIError(f"模型输出含临床表述「{term}」，已拒绝显示")
-    return {
-        "meaning": meaning,
-        "tone": tone,
-        "subtext": subtext,
-        "replies": replies,
-        "cultural_notes": notes,
-        "target_lang": target_lang,
-        "safety": "ok",
-    }
-
-
-def interpret_message(text: str, source_lang: str = "en", target_lang: str = "zh", relation: str = "peer") -> dict:
-    """解读对方发来的一句话：字面、语气、可能的潜台词，以及可选的回复。
-
-    发送内容只在本次请求内使用，不落库；调用方必须先取得用户的明确操作。
-    """
-    cfg = config()
-    if not cfg["enabled"]:
-        raise AIError("未配置 AI 服务：请先配置 TETHER_AI_API_KEY")
-    payload = {
-        "message": text[:500],
-        "message_language": pragmatics.model_name(source_lang),
-        "explain_in": pragmatics.model_name(target_lang),
-        "relation": relation if relation in EXPRESSION_RELATIONS else "peer",
-        # 解读依赖两边文化的表达习惯：日语/韩语的含蓄程度和英语不是一回事。
-        "source_pragmatics": pragmatics.plan(source_lang),
-        "target_pragmatics": pragmatics.plan(target_lang),
-    }
-    messages = [
-        {"role": "system", "content": INTERPRET_SYSTEM_PROMPT},
-        {"role": "user", "content": "请解读以下 JSON 里的 message，不要添加事实：\n" + json.dumps(payload, ensure_ascii=False)},
-    ]
-    return _validate_interpretation(_parse_json(_chat(cfg, messages)), target_lang)
-
-
 # --------------------------------------------------------------------------- #
 # 合并与缓存
 # --------------------------------------------------------------------------- #
@@ -788,20 +558,14 @@ def cache_prune(connection=None) -> None:
 
 
 def data_revision(user_id: int) -> int:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         row = conn.execute("SELECT data_revision FROM users WHERE id = ?", (user_id,)).fetchone()
         return row["data_revision"] if row else -1
-    finally:
-        conn.close()
 
 
 def cache_get(key: str, user_id: int) -> dict | None:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         row = conn.execute("SELECT payload, created_at FROM ai_cache WHERE key = ? AND user_id = ?", (key, user_id)).fetchone()
-    finally:
-        conn.close()
     if not row:
         return None
     try:
@@ -817,8 +581,7 @@ def cache_get(key: str, user_id: int) -> dict | None:
 
 
 def cache_put(key: str, narrative: dict, model: str, user_id: int, revision: int) -> bool:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         # Deletion/edit and cache insertion serialize on the same SQLite write lock.
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT data_revision FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -833,8 +596,6 @@ def cache_put(key: str, narrative: dict, model: str, user_id: int, revision: int
         )
         conn.commit()
         return True
-    finally:
-        conn.close()
 
 
 def cache_clear(user_id: int, connection=None) -> None:

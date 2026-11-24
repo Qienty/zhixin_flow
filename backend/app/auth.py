@@ -132,20 +132,14 @@ def _row_to_user(row: sqlite3.Row) -> dict:
 
 
 def get_user(user_id: int) -> dict | None:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    finally:
-        conn.close()
     return _row_to_user(row) if row else None
 
 
 def get_user_by_name(username: str) -> dict | None:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    finally:
-        conn.close()
     return _row_to_user(row) if row else None
 
 
@@ -177,15 +171,12 @@ def create_user(username: str, password: str) -> dict:
 def set_password(user_id: int, new_password: str) -> None:
     check_password_strength(new_password, (get_user(user_id) or {}).get("username", ""))
     pass_hash, salt = hash_password(new_password)
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         conn.execute(
             "UPDATE users SET pass_hash = ?, pass_salt = ?, updated_at = ? WHERE id = ?",
             (pass_hash, salt, db.now_iso(), user_id),
         )
         conn.commit()
-    finally:
-        conn.close()
     # 改密码后其他设备上的会话立即失效
     delete_user_sessions(user_id)
 
@@ -194,27 +185,21 @@ def update_user(user_id: int, **fields) -> dict:
     allowed = {"plan", "region", "lang"}
     sets = [f"{k} = ?" for k in fields if k in allowed]
     values = [v for k, v in fields.items() if k in allowed]
-    # 显式选过语言之后，浏览器语言不再覆盖它（多设备一致）。
+    # 显式选过语言之后，以账号为准（多设备一致）；没选过则回落中文。
     if fields.get("lang") in ("zh", "en"):
         sets.append("lang_set = 1")
     if sets:
         values.append(db.now_iso())
         values.append(user_id)
-        conn = db.connect()
-        try:
+        with db.session() as conn:
             conn.execute(f"UPDATE users SET {', '.join(sets)}, updated_at = ? WHERE id = ?", values)
             conn.commit()
-        finally:
-            conn.close()
     return get_user(user_id)
 
 
 def authenticate(username: str, password: str) -> dict:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    finally:
-        conn.close()
     # Unknown accounts spend the same scrypt work and receive the same public error.
     valid = verify_password(password, row["pass_salt"] if row else "0" * 32, row["pass_hash"] if row else "0" * 64)
     if not row or not valid:
@@ -252,50 +237,38 @@ def create_session(user_id: int) -> tuple[str, str]:
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     expires = now + timedelta(days=SESSION_DAYS)
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now.isoformat(timespec="seconds"),))
         conn.execute(
             "INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?, ?, ?, ?)",
             (token, user_id, now.isoformat(timespec="seconds"), expires.isoformat(timespec="seconds")),
         )
         conn.commit()
-    finally:
-        conn.close()
     return token, expires.isoformat(timespec="seconds")
 
 
 def user_by_token(token: str) -> dict | None:
     if not token:
         return None
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         row = conn.execute(
             "SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id "
             "WHERE s.token = ? AND s.expires_at > ?",
             (token, datetime.now(timezone.utc).isoformat(timespec="seconds")),
         ).fetchone()
-    finally:
-        conn.close()
     return _row_to_user(row) if row else None
 
 
 def delete_session(token: str) -> None:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
         conn.commit()
-    finally:
-        conn.close()
 
 
 def delete_user_sessions(user_id: int) -> None:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.commit()
-    finally:
-        conn.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -309,8 +282,7 @@ def redeem(user_id: int, code: str) -> dict:
     if not code:
         raise AuthError(422, "请输入兑换码")
 
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         # Reserve the write transaction before checking the remaining uses.
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM redeem_codes WHERE code = ?", (code,)).fetchone()
@@ -335,8 +307,6 @@ def redeem(user_id: int, code: str) -> dict:
         )
         conn.commit()
         plan = row["plan"]
-    finally:
-        conn.close()
     return get_user(user_id) | {"redeemed_plan": plan}
 
 
@@ -359,9 +329,6 @@ def create_code(code: str, plan: str = "pro", max_uses: int = 1, note: str = "")
 
 
 def list_codes() -> list[dict]:
-    conn = db.connect()
-    try:
+    with db.session() as conn:
         rows = conn.execute("SELECT * FROM redeem_codes ORDER BY created_at DESC").fetchall()
-    finally:
-        conn.close()
     return [dict(r) for r in rows]

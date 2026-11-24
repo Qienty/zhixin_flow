@@ -15,11 +15,6 @@
 .expression-mode.on { background: var(--moss-tint); border-color: var(--moss); color: var(--ink); font-weight: 600; }
 .expression-mode:focus-visible, .expression-save summary:focus-visible { outline: 2px solid var(--moss); outline-offset: 3px; }
 .expression-prompts { border-left: 2px solid var(--line-strong); padding-left: 14px; }
-.expression-cross-border { border: 1px solid var(--line); border-radius: 16px; padding: 14px; background: var(--surface-soft); }
-.expression-cross-border .row select { flex: 1 1 0; min-width: 0; }
-.expression-cross-border .row .btn { flex: 1 1 auto; }
-.expression-translation-result { min-height: 104px !important; background: var(--surface); }
-.expression-translation-notes { margin: 0; padding-left: 18px; line-height: 1.6; }
 .expression-save { padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-soft); }
 .expression-save summary { cursor: pointer; line-height: 1.6; }
 .expression-save[open] summary { margin-bottom: 16px; }
@@ -1486,7 +1481,7 @@ body.gated .view { max-width: 480px; padding: 28px 24px calc(24px + var(--safe-t
 .auth-wrap { gap: 24px; }
 .auth-masthead { margin-bottom: 4px; }
 .language-switch { display: flex; padding: 3px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
-.language-switch button { min-width: 44px; min-height: 40px; padding: 0 10px; border-radius: 9px; font-size: 12px; color: var(--muted); }
+.language-switch button { min-width: 44px; min-height: 44px; padding: 0 10px; border-radius: 9px; font-size: 12px; color: var(--muted); }
 .language-switch button.on { background: var(--moss-tint); color: var(--ink); font-weight: 600; }
 .auth-intro { align-items: flex-start; text-align: left; gap: 14px; }
 .auth-landscape { width: 100%; height: 144px; overflow: hidden; border-radius: 20px; margin-bottom: 4px; background: var(--moss-tint); }
@@ -1563,24 +1558,7 @@ body.gated .view { max-width: 480px; padding: 28px 24px calc(24px + var(--safe-t
 /* The visible section title leads; its textarea keeps its own accessible label. */
 .expression-card > label > .field-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-/* -------------------------------------------------- 跨境表达 & 每周证据卡 */
-.cross-card { border-color: var(--line); gap: 12px; }
-.cross-card .section-title { font-size: 21px; }
-.cross-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.cross-scenes { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-.cross-scene { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; text-align: left; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 14px; color: var(--ink); transition: border-color .18s ease, background .18s ease; }
-.cross-scene:hover { border-color: var(--line-strong); background: var(--moss-tint); }
-.cross-scene strong { font-size: 15px; font-weight: 600; }
-.cross-scene .tiny { color: var(--ink-2); line-height: 1.5; }
-.cross-result { width: 100%; min-height: 120px; resize: vertical; line-height: 1.7; background: var(--surface-soft); }
-.cross-alt { padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 14px; }
-.cross-alt-text { margin: 0; color: var(--ink); line-height: 1.7; white-space: pre-wrap; }
-.cross-notes { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: var(--ink-2); }
-.cross-hear { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
-.cross-hear .tiny { margin: 0; }
-.cross-hear .btn { justify-content: center; }
-.cross-tone-badge { display: inline-flex; align-self: flex-start; margin: 0; padding: 6px 12px; border-radius: 999px; background: var(--moss-tint); color: var(--ink); font-size: 13px; }
-.cross-ai-gap { margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-soft); border: 1px dashed var(--brick); color: var(--brick); }
+/* -------------------------------------------------- 安装卡 / 翻页器 / 每周证据卡 */
 .install-card { border-color: var(--line-strong); gap: 8px; }
 .install-card .eyebrow { color: var(--ink); }
 .install-card p { margin: 0; }
@@ -1750,3 +1728,30 @@ summary:focus-visible {
    代价：上述两种小屏上需轻微下滚才看到登录按钮。
    如需恢复：在 @media (max-width: 600px) 内加回 auth-wrap / auth-intro /
    auth-landscape / auth-card 的覆盖，以及矮屏那一段。 */
+
+/* 16. 就诊摘要：一页纸，可打印、可下载 */
+.handoff-sheet { max-width: 560px; gap: 14px; }
+.handoff-actions { margin: 0; }
+.handoff-body { gap: 8px; }
+.handoff-range { margin: 0; color: var(--muted); }
+.handoff-h { margin: 10px 0 2px; font-size: 13px; font-weight: 600; letter-spacing: 0; color: var(--ink-2); }
+.handoff-h:first-of-type { margin-top: 4px; }
+.handoff-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.handoff-label { flex: 0 0 auto; color: var(--muted); font-size: 13px; }
+.handoff-value { text-align: right; color: var(--ink); font-size: 14px; line-height: 1.6; }
+.handoff-line { margin: 0; color: var(--ink); font-size: 14px; line-height: 1.7; }
+.handoff-questions input { width: 100%; }
+.handoff-note { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); }
+
+/* 打印：只留这一页，去掉导航与按钮，白底黑字 */
+@media print {
+  @page { margin: 16mm 14mm; }
+  html, body { background: #fff !important; color: #111 !important; }
+  body > *:not(#overlay) { display: none !important; }
+  #overlay { position: static !important; display: block !important; background: #fff !important; }
+  .overlay > .sheet, .handoff-sheet { box-shadow: none !important; border: 0 !important; max-height: none !important; width: 100% !important; padding: 0 !important; background: #fff !important; }
+  .no-print, .handoff-actions, .icon-btn { display: none !important; }
+  .handoff-sheet input { border: 0 !important; border-bottom: 1px solid #999 !important; border-radius: 0 !important; background: transparent !important; }
+  .handoff-h { color: #000; }
+  .handoff-label, .handoff-note, .handoff-range { color: #444; }
+}

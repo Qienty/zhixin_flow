@@ -36,6 +36,60 @@ class ReviewFixes(unittest.TestCase):
         with patch.object(auth, 'create_code', side_effect=auth.AuthError(400, 'unexpected')), self.assertRaises(auth.AuthError):
             codes.generate_code()
 
+    def test_route_registration_order_is_stable(self):
+        # 路由按注册顺序匹配，而拆到 app/api/routes/ 之后顺序由 __init__ 的导入顺序决定。
+        # 这条用例把顺序钉住：调整导入顺序、或把新路由插到前面，都必须显式改这里。
+        expected = [
+            ('GET', '^/api/bootstrap$'),
+            ('GET', '^/api/home$'),
+            ('POST', '^/api/import$'),
+            ('GET', '^/api/health$'),
+            ('GET', '^/api/meta$'),
+            ('POST', '^/api/entries$'),
+            ('GET', '^/api/entries$'),
+            ('DELETE', '^/api/entries$'),
+            ('GET', r'^/api/entries/(?P<entry_id>\d+)$'),
+            ('PATCH', r'^/api/entries/(?P<entry_id>\d+)$'),
+            ('DELETE', r'^/api/entries/(?P<entry_id>\d+)$'),
+            ('GET', r'^/api/interventions/(?P<emotion>[a-z]+)$'),
+            ('POST', r'^/api/entries/(?P<entry_id>\d+)/intervention$'),
+            ('GET', '^/api/handoff$'),
+            ('POST', '^/api/ai/selftest$'),
+            ('GET', '^/api/practices$'),
+            ('POST', '^/api/practice-sessions$'),
+            ('GET', '^/api/practice-sessions$'),
+            ('GET', '^/api/practice-summary$'),
+            ('GET', '^/api/weekly-card$'),
+            ('GET', r'^/api/practice-sessions/(?P<session_id>\d+)$'),
+            ('PATCH', r'^/api/practice-sessions/(?P<session_id>\d+)$'),
+            ('DELETE', r'^/api/practice-sessions/(?P<session_id>\d+)$'),
+            ('GET', '^/api/practice-export$'),
+            ('GET', '^/api/stats/basic$'),
+            ('GET', '^/api/insights$'),
+            ('POST', '^/api/insights/analyze$'),
+            ('POST', '^/api/auth/register$'),
+            ('POST', '^/api/auth/login$'),
+            ('POST', '^/api/auth/logout$'),
+            ('GET', '^/api/auth/me$'),
+            ('POST', '^/api/auth/password$'),
+            ('POST', '^/api/account/redeem$'),
+            ('GET', '^/api/account$'),
+            ('PATCH', '^/api/account/settings$'),
+            ('GET', '^/api/crisis$'),
+            ('GET', '^/api/wheel$'),
+            ('PUT', '^/api/wheel$'),
+            ('GET', '^/api/export$'),
+            ('POST', '^/api/demo/seed$'),
+        ]
+        actual = [(method, rx.pattern) for method, rx, _ in api.router._routes]
+        self.assertEqual(actual, expected)
+
+    def test_public_api_surface_stays_importable(self):
+        # server.py 与测试都从 app.api 顶层取这些名字；拆包后不能只剩子模块。
+        for name in ('Request', 'Response', 'dispatch', 'parse_query', 'ApiError', 'PUBLIC_PATHS',
+                     'WINDOW_DAYS', 'router', '_dates', '_normalize_time', '_csv_cell'):
+            self.assertTrue(hasattr(api, name), name)
+
     def test_wheel_types_reject_atomically(self):
         baseline = self.request('PUT', '/api/wheel', {'items': ['walk', 'rest']}).payload['items']
         for item in (5, True, None, [], ['bad'], {'label': 5}, {}):
@@ -44,6 +98,16 @@ class ReviewFixes(unittest.TestCase):
                 self.assertEqual(result.status, 422)
                 self.assertEqual(self.request('GET', '/api/wheel').payload['items'], baseline)
         self.assertEqual(self.request('PUT', '/api/wheel', {'items': [{'label': 'a'}, {'label': 'b'}]}).status, 200)
+
+    def test_redeem_rejects_non_string_codes_without_a_server_error(self):
+        for code in (123, True, ['QNTY-AAAA-AAAA'], {'nested': 1}, 1.5):
+            with self.subTest(code=code):
+                result = self.request('POST', '/api/account/redeem', {'code': code})
+                self.assertEqual(result.status, 400)
+        # 空值仍是 422，与既有「请输入兑换码」的语义一致
+        self.assertEqual(self.request('POST', '/api/account/redeem', {}).status, 422)
+        self.assertEqual(self.request('POST', '/api/account/redeem', {'code': '  '}).status, 422)
+        self.assertEqual(self.request('GET', '/api/account').payload['plan'], 'free')
 
     def test_keyword_boundaries_and_chinese_phrases(self):
         for text in ('still', 'billion', 'homeworkless', 'applicationless'):

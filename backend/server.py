@@ -323,10 +323,15 @@ class Server(ThreadingHTTPServer):
                 request.shutdown(socket.SHUT_WR)
                 # Drain a small already-arriving request so closing the socket
                 # does not reset the 503 response. Keep the accept loop bounded.
-                deadline, remaining = time.monotonic() + 0.02, 65536
+                # 0.06s：机器忙时调度会让「发完 503 立刻 close」丢掉未读的请求字节，
+                # 客户端看到的是连接被重置而不是 503。这个窗口只在满载拒绝时付出。
+                deadline, remaining = time.monotonic() + 0.06, 65536
                 while remaining and time.monotonic() < deadline:
                     request.settimeout(max(0.001, deadline - time.monotonic()))
-                    chunk = request.recv(min(8192, remaining))
+                    try:
+                        chunk = request.recv(min(8192, remaining))
+                    except OSError:
+                        break
                     if not chunk:
                         break
                     remaining -= len(chunk)

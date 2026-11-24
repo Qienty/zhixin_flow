@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 import os
 import sqlite3
@@ -155,9 +156,18 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-def init_db() -> None:
+@contextlib.contextmanager
+def session():
+    """连接用完必关；提交与回滚仍由调用方决定，语义与 connect() 完全一致。"""
     conn = connect()
     try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    with session() as conn:
         conn.executescript(SCHEMA)
         _migrate(conn)
         for key, value in DEFAULTS.items():
@@ -166,8 +176,6 @@ def init_db() -> None:
                 (key, value or now_iso()),
             )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -187,7 +195,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_rank ON entries(user_id, COALESCE(severity, 0) DESC, occurred_at DESC, id DESC)")
     if "data_revision" not in _columns(conn, "users"):
         conn.execute("ALTER TABLE users ADD COLUMN data_revision INTEGER NOT NULL DEFAULT 0")
-    # lang_set 区分「账号默认语言」和「用户自己选过」：改过的才覆盖浏览器语言。
+    # lang_set 区分「账号默认语言」和「用户自己选过」：只有改过的才算用户选择。
     if "lang_set" not in _columns(conn, "users"):
         conn.execute("ALTER TABLE users ADD COLUMN lang_set INTEGER NOT NULL DEFAULT 0")
     if "user_id" not in _columns(conn, "ai_cache"):
@@ -206,25 +214,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def get_setting(key: str, default: str = "") -> str:
-    conn = connect()
-    try:
+    with session() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
-    finally:
-        conn.close()
 
 
 def set_setting(key: str, value: str) -> None:
-    conn = connect()
-    try:
+    with session() as conn:
         conn.execute(
             "INSERT INTO settings(key, value) VALUES(?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def row_to_dict(row: sqlite3.Row) -> dict:

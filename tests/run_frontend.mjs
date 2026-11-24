@@ -11,7 +11,8 @@ const clientSource = await read("frontend/js/api.js");
 const i18nSource = await read("frontend/js/i18n.js");
 const practiceSource = await read("frontend/js/practices.js");
 const expressionSource = await read("frontend/js/expression.js");
-const crossingSource = await read("frontend/js/crossing.js");
+const handoffSource = await read("frontend/js/handoff.js");
+const utilSource = await read("frontend/js/util.js");
 const plain = (source) => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -66,7 +67,6 @@ function app(overrides = {}) {
     weeklyCard: async () => { calls.push("weekly"); return { days: 7, since: today, until: today,
       entries: { count: 0, severe: 0, days: 0, top_emotion: null }, previous: { count: 0, severe: 0 },
       practices: { completed: 0, paired: 0, before_average: null, after_average: null, drops: 0, better: 0, same: 0, worse: 0 } }; },
-    interpretMessage: async () => { calls.push("interpret"); return { meaning: "fixture", tone: "neutral", subtext: "", replies: [], cultural_notes: [] }; },
     aiSelftest: async () => { calls.push("selftest"); return { ok: true, ms: 5, model: "test-model", provider: "custom", fallback: false }; },
     stats: async () => { calls.push("stats"); return { entries: 8 }; },
     cancelPending: () => calls.push("cancel"), logout: async () => {}, ...overrides,
@@ -85,11 +85,11 @@ function app(overrides = {}) {
     t: (key) => key, getLang: () => "zh", tzOffset: () => 480, messages,
     isNativeShell: () => false, setAuthToken: () => {}, restoreAuthToken: () => "",
   });
-  vm.runInContext(plain(expressionSource) + '\n' + plain(practiceSource) + '\n' + plain(crossingSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
+  vm.runInContext(plain(utilSource) + '\n' + plain(expressionSource) + '\n' + plain(handoffSource) + '\n' + plain(practiceSource) + '\n' + plain(appSource).replace(/\nboot\(\);\s*$/, "") + `
     globalThis.renders = 0;
     render = () => { ++globalThis.renders; }; renderAuth = () => {}; renderLogList = () => {};
     toast = (message) => messages.push(message);
-    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay, expression, practice, crossing, wheel };
+    globalThis.hooks = { state, iv, sheet, loadedAt, ACTIONS, overlay, expression, practice, handoff, wheel };
   `, context);
   Object.assign(context.hooks.state, { account: { user: { id: 1 } }, home: { local_today: today }, logReady: true, insights: { old: true } });
   context.hooks.overlay.hidden = true;
@@ -97,7 +97,7 @@ function app(overrides = {}) {
 }
 
 test("JavaScript syntax and Chinese/English key parity", async () => {
-  for (const file of ["app", "api", "i18n", "practices", "expression", "crossing", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
+  for (const file of ["app", "api", "i18n", "practices", "expression", "handoff", "util", "theme-init", "register-sw"]) new vm.Script(plain(await read(`frontend/js/${file}.js`)));
   const context = vm.createContext({});
   vm.runInContext(plain(i18nSource) + "\nglobalThis.tables = dict;", context);
   assert.deepEqual(Object.keys(context.tables.zh).sort(), Object.keys(context.tables.en).sort());
@@ -559,17 +559,17 @@ test("Service worker precache failure rejects install before taking over", async
   assert.deepEqual(calls, []);
 });
 
-test("Home offers the cross-language entry and the weekly evidence card", async () => {
+test("Home keeps the record entry and the weekly evidence card", async () => {
   const a = app();
   Object.assign(a.hooks.state, {
     meta: { emotions: [] },
     home: { items: [], total: 0, watch: false, local_today: "2026-11-22" },
   });
+  // 跨语言功能已移除：首页只剩记录与情绪入口
   const home = a.context.viewNow();
-  for (const id of ["deadline", "decline", "apologize", "ask_help", "conflict", "bad_news", "negotiate", "boundary"]) {
-    assert.ok(home.includes(`data-act="c-start" data-id="${id}"`), id);
-  }
-  assert.ok(home.includes("cross-card"));
+  assert.ok(home.includes('data-act="e-open"'), "自由表达入口还在");
+  assert.ok(!home.includes("cross-entry"), "跨语言入口已移除");
+  assert.ok(home.includes("emotion-section"), "情绪入口还在");
   a.hooks.state.weekly = {
     days: 7, since: "2026-11-16", until: "2026-11-22",
     entries: { count: 2, severe: 1, days: 2, top_emotion: "anger" },
@@ -600,108 +600,31 @@ test("Weekly card shows an empty state instead of zeros", async () => {
   assert.ok(!insights.includes("week-lines"));
 });
 
-test("Cross-language scene flow asks for details before calling the model", async () => {
-  let calls = 0;
-  const a = app({ translateExpression: async () => { calls++; return { text: "x", alternatives: [], cultural_notes: [] }; } });
-  await a.hooks.crossing.handle("start", { dataset: { id: "deadline" } });
-  const html = a.hooks.overlay.innerHTML;
-  assert.ok(html.includes("cross.field_what"));
-  assert.ok(html.includes("data-cross-field=\"want\""));
-  assert.ok(html.includes('data-act="c-generate"'));
-  await a.hooks.crossing.handle("generate", { dataset: {} });
-  assert.equal(calls, 0, "an empty form must not reach the model");
-});
-
-test("Cross-language result exposes copy and an alternative tone", async () => {
-  let sent = null;
-  const a = app({ translateExpression: async (payload) => {
-    sent = payload;
-    return { text: "I can't take this on this week.", alternatives: [{ tone: "direct", text: "No, not this week." }], cultural_notes: ["先给结论"], intent: "ask_space" };
-  } });
-  await a.hooks.crossing.handle("start", { dataset: { id: "decline" } });
-  a.hooks.crossing.input({ dataset: { crossField: "what" }, value: "加班" });
-  await a.hooks.crossing.handle("generate", { dataset: {} });
-  assert.equal(sent && sent.details && sent.details.what, "加班");
-  assert.equal(Object.keys(sent.details).length, 1);
-  assert.equal(sent.scene, "decline");
-  assert.equal(sent.target_lang, "en");
-  const html = a.hooks.overlay.innerHTML;
-  assert.ok(html.includes("I can&#39;t take this on this week."), html.slice(0, 400));
-  assert.ok(html.includes("data-act=\"c-copy\""));
-  assert.ok(html.includes("No, not this week."));
-  assert.ok(html.includes("先给结论"));
-});
-
-test("Inbound direction exists, and an empty message never reaches the model", async () => {
-  let calls = 0;
-  const a = app({ interpretMessage: async () => { calls++; return { meaning: "x", tone: "neutral", subtext: "", replies: [], cultural_notes: [] }; } });
-  Object.assign(a.hooks.state, { meta: { emotions: [] }, home: { items: [], total: 0, watch: false, local_today: "2026-11-22" } });
-  assert.ok(a.context.viewNow().includes('data-act="c-hear"'));
-  await a.hooks.crossing.handle("hear", { dataset: {} });
-  assert.ok(a.hooks.overlay.innerHTML.includes("cross.hear_placeholder"));
-  await a.hooks.crossing.handle("hear-generate", { dataset: {} });
-  assert.equal(calls, 0);
-});
-
-test("Inbound result shows meaning, tone and copyable replies", async () => {
-  let sent = null;
-  const a = app({ interpretMessage: async (payload) => {
-    sent = payload;
-    return { meaning: "对方在提一个具体的请求", tone: "tense", subtext: "可能有点不满（不确定）",
-      replies: [{ tone: "polite", text: "明白，下次我先确认。" }], cultural_notes: ["这句在英语里偏直接"], target_lang: "zh", safety: "ok" };
-  } });
-  await a.hooks.crossing.handle("hear", { dataset: {} });
-  a.hooks.crossing.input({ dataset: { heard: "" }, value: "Could you be more careful next time?" });
-  await a.hooks.crossing.handle("hear-generate", { dataset: {} });
-  assert.equal(sent && sent.text, "Could you be more careful next time?");
-  assert.equal(sent.source_lang, "en");
-  assert.equal(sent.target_lang, "zh");
-  const html = a.hooks.overlay.innerHTML;
-  assert.ok(html.includes("cross.hear_tone_tense"));
-  assert.ok(html.includes("对方在提一个具体的请求"));
-  assert.ok(html.includes("可能有点不满"));
-  assert.ok(html.includes("明白，下次我先确认。"));
-  assert.ok(html.includes('data-act="c-copy-reply"'));
-});
-
-test("Interface language prefers a saved choice, then an explicit account setting, then the browser", async () => {
+test("Interface language prefers a saved choice, then an explicit account setting, then Chinese", async () => {
   const a = app();
-  assert.equal(a.context.pickInitialLang(null, "en-US", null, false), "en");
-  assert.equal(a.context.pickInitialLang(null, "zh-CN", null, false), "zh");
-  assert.equal(a.context.pickInitialLang(null, "ja-JP", null, false), "en");  // 非中文浏览器默认英文
-  assert.equal(a.context.pickInitialLang("zh", "en-US", "en", true), "zh");    // 本机选过的最优先
-  assert.equal(a.context.pickInitialLang(null, "en-US", "zh", true), "zh");    // 账号明确设过
-  assert.equal(a.context.pickInitialLang(null, "en-US", "zh", false), "en");   // 只是默认值，不覆盖浏览器
+  // 浏览器语言不参与：面向国内，任何系统语言下首次打开都是中文
+  assert.equal(a.context.pickInitialLang(null, null, false), "zh");
+  assert.equal(a.context.pickInitialLang("en", null, false), "en");  // 本机选过英文就给英文
+  assert.equal(a.context.pickInitialLang("zh", "en", true), "zh");    // 本机选过的最优先
+  assert.equal(a.context.pickInitialLang(null, "zh", true), "zh");    // 账号明确设过
+  assert.equal(a.context.pickInitialLang(null, "en", true), "en");    // 账号明确选了英文
+  assert.equal(a.context.pickInitialLang(null, "en", false), "zh", "账号只是默认值，不跟随");
 });
 
-test("AI is presented as part of the product, not an optional add-on", async () => {
+test("AI connection status is shown in Me and stays honest when unconfigured", async () => {
   const a = app();
   Object.assign(a.hooks.state, {
-    meta: { emotions: [], regions: [], ai: { enabled: false } },
-    home: { items: [], total: 0, watch: false, local_today: "2026-11-22" },
+    meta: { emotions: [], regions: [], ai: { enabled: true, model: "deepseek-flash", provider: "deepseek", fallback: true } },
+    account: { pro: false, user: { username: "x" } },
   });
-  assert.ok(a.context.viewNow().includes("cross.ai_disabled"));
-  a.hooks.state.meta.ai = { enabled: true, model: "deepseek-flash", provider: "deepseek", fallback: true };
-  assert.ok(!a.context.viewNow().includes("cross.ai_disabled"));
   const mine = a.context.viewMe();
   assert.ok(mine.includes("ai.connected"));
   assert.ok(mine.includes('data-act="ai-selftest"'));
-});
 
-test("Language choices come from the server configuration", async () => {
-  const a = app();
-  Object.assign(a.hooks.state, { meta: { emotions: [], languages: [
-    { code: "zh", label: "中文" }, { code: "en", label: "English" }, { code: "ja", label: "日语" },
-  ] } });
-  await a.hooks.crossing.handle("start", { dataset: { id: "deadline" } });
-  const html = a.hooks.overlay.innerHTML;
-  assert.ok(html.includes('value="ja"'));
-  assert.ok(html.includes('value="zh"'));
-  // 中文界面默认目标仍是英文，而不是服务器列表里的第一个
-  assert.ok(/value="en"\s+selected/.test(html));
-  await a.hooks.crossing.handle("back", { dataset: {} });
-  await a.hooks.crossing.handle("hear", { dataset: {} });
-  assert.ok(a.hooks.overlay.innerHTML.includes('value="ja"'));
+  a.hooks.state.meta.ai = { enabled: false };
+  const off = a.context.viewMe();
+  assert.ok(off.includes("ai.disconnected"));
+  assert.ok(!off.includes('data-act="ai-selftest"'), "没连上就不给无效按钮");
 });
 
 test("Install entry appears in the browser and disappears once installed", async () => {
@@ -869,6 +792,120 @@ test("Records page turns a page of eight instead of scrolling forever", async ()
   const before = seen.length;
   await a.context.pageLog(true);
   assert.equal(seen.length, before, "到最后一页后不再请求");
+});
+
+test("Appointment summary renders facts and keeps questions out of the account", async () => {
+  const sent = [];
+  const payload = {
+    days: 30, since: "2026-10-26", until: "2026-11-24", generated_at: "2026-11-24T12:00:00+00:00",
+    entries: {
+      entries: 28, days_logged: 20, avg_severity: 3.0, severe_count: 9,
+      emotion_distribution: [{ label: "愤怒", count: 12 }, { label: "焦虑", count: 9 }],
+      top_causes: [{ label: "被临时加需求", count: 6 }],
+    },
+    hours: [{ key: "morning", label: "上午", range: "5—12 点", count: 10 }],
+    week: { entries: 14, severe: 4, previous_entries: 14, previous_severe: 5 },
+    practices: { completed: 1, paired: 1, before_average: 4, after_average: 2, drops: 1, feedback: {}, titles: [] },
+    highlights: [{ date: "2026-11-15", emotion: "愤怒", severity: 5, cause: "被临时加需求" }],
+    notes: "这是你自己记录的整理，不是诊断。",
+  };
+  const a = app({ handoff: async (days) => { sent.push(days); return payload; } });
+  await a.hooks.handoff.handle("open", { dataset: {} });
+  assert.equal(sent.at(-1), 30);
+  const html = a.hooks.overlay.innerHTML;
+  // 测试沙箱里的 t() 只回 key，所以这里验结构与各区块是否渲染；
+  // 真实数字由后端用例和浏览器验收覆盖。
+  assert.ok(html.includes("handoff-sheet"));
+  assert.ok(html.includes("handoff.entries_value"), "概览");
+  assert.ok(html.includes("handoff.sec_triggers"), "触发场景区块");
+  assert.ok(html.includes("handoff.sec_high"), "最高强度区块");
+  assert.ok(html.includes('data-act="h-print"'));
+  assert.ok(html.includes('data-act="h-download"'));
+  assert.equal((html.match(/data-handoff-q="\d"/g) || []).length, 3, "三个可填的问题");
+
+  // 换窗口会重新拉取
+  await a.hooks.handoff.handle("window", { dataset: { days: "90" } });
+  assert.equal(sent.at(-1), 90);
+
+  // 填的问题只留在页面状态里（不进账号）
+  a.hooks.handoff.input({ dataset: { handoffQ: "0" }, value: "为什么我一到下午就难受？" });
+  assert.equal(a.calls.filter((call) => String(call).includes("entries")).length, 0, "填问题不触发任何写入");
+  await a.hooks.handoff.handle("close", { dataset: {} });
+});
+
+test("A failed window switch keeps the old window, its numbers and its highlight", async () => {
+  const payload = {
+    days: 30, since: "2026-11-01", until: "2026-11-30",
+    entries: { entries: 10, days_logged: 6, avg_severity: 3, severe_count: 2, emotion_distribution: [], top_causes: [] },
+    hours: [], week: {}, practices: {}, highlights: [], notes: "n",
+  };
+  let calls = 0;
+  const a = app({
+    handoff: async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("网络连接失败");
+      return payload;
+    },
+  });
+  await a.hooks.handoff.handle("open", { dataset: {} });
+  await a.hooks.handoff.handle("window", { dataset: { days: "90" } });
+
+  const html = a.hooks.overlay.innerHTML;
+  assert.ok(html.includes("网络连接失败"), "失败要给出提示");
+  assert.ok(/class="chip on"[^>]*data-days="30"/.test(html), "失败后高亮应留在原来的 30 天");
+  assert.ok(!/class="chip on"[^>]*data-days="90"/.test(html), "不能把 90 天标为当前窗口");
+  assert.ok(html.includes('data-act="h-download"'), "旧数据仍可下载/打印");
+  await a.hooks.handoff.handle("close", { dataset: {} });
+});
+
+test("Escaping and colour helpers keep valid values and neutralise unsafe ones", async () => {
+  const context = vm.createContext({});
+  vm.runInContext(plain(utilSource) + "\nglobalThis.util = { esc, hexToRgb, safeColor, safeHref, brighten };", context);
+  const { esc, hexToRgb, safeColor, safeHref, brighten } = context.util;
+
+  assert.equal(esc(`<a href="x">'&`), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;");
+  assert.equal(esc(null), "");
+
+  assert.equal(safeColor("#8C6A3F"), "#8C6A3F");
+  assert.equal(safeColor("#abc"), "#abc");
+  assert.equal(safeColor('#fff" onmouseover="alert(1)'), "#8d948c");
+  assert.equal(safeColor(undefined), "#8d948c");
+
+  assert.equal(safeHref("https://988lifeline.org"), "https://988lifeline.org");
+  assert.equal(safeHref("javascript:alert(1)"), "#");
+  assert.equal(safeHref("http://insecure.example"), "#");
+
+  assert.equal(hexToRgb("#f00").join(","), "255,0,0");
+  assert.equal(hexToRgb("#0f0").join(","), "0,255,0");
+  assert.equal(brighten("#f5f0e8"), "#f5f0e8", "浅色原样返回");
+  assert.match(brighten("#7C9A87"), /^#[0-9a-f]{6}$/, "深色被提亮成合法色值");
+});
+
+test("Service worker precaches every imported module and every entry exists on disk", async () => {
+  const sw = await read("frontend/sw.js");
+  const block = /const SHELL = \[([\s\S]*?)\];/.exec(sw);
+  assert.ok(block, "sw.js 里找不到 SHELL 清单");
+  const shell = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const webRoot = new URL("frontend/", root); // 清单里的路径相对站点根
+
+  // 列进去的东西必须真的在磁盘上：改名/删文件时不能让 install 静默失败
+  for (const entry of shell) {
+    if (entry === "./") continue;
+    const info = await fs.stat(new URL(entry, webRoot)).catch(() => null);
+    assert.ok(info && info.isFile(), `预缓存条目在磁盘上不存在：${entry}`);
+  }
+
+  // 反过来：页面 import 的每个模块都必须在清单里，否则离线冷启动白屏
+  const imports = [];
+  for (const file of ["app", "api", "i18n", "practices", "expression", "handoff", "util", "theme-init", "register-sw"]) {
+    const text = await read(`frontend/js/${file}.js`);
+    for (const match of text.matchAll(/^import\s[^;]*?from\s+"(\.[^"]+)";/gm)) imports.push(match[1]);
+  }
+  assert.ok(imports.length > 0, "没解析到任何 import");
+  for (const spec of imports) {
+    const entry = "./js/" + spec.replace(/^\.\//, "");
+    assert.ok(shell.includes(entry), `模块未被预缓存，离线冷启动会白屏：${spec}`);
+  }
 });
 
 let failures = 0;

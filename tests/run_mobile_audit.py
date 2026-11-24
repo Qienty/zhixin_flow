@@ -32,8 +32,6 @@ def main():
             raise AssertionError("Mobile audit must not call a real AI provider")
 
         ai.analyze = no_model
-        ai.rewrite_expression = no_model
-        ai.interpret_message = no_model
         db.init_db()
 
         class QuietHandler(server.Handler):

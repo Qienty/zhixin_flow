@@ -4,7 +4,8 @@ import { api, setApiLang, tzOffset, isNativeShell, setAuthToken, restoreAuthToke
 import { t, setLang, getLang, applyStaticText } from "./i18n.js";
 import { createPracticeController } from "./practices.js";
 import { createExpressionController } from "./expression.js";
-import { createCrossingController } from "./crossing.js";
+import { createHandoffController } from "./handoff.js";
+import { brighten, esc, hexToRgb, safeColor, safeHref } from "./util.js";
 
 /* ------------------------------------------------------------- 常量与状态 */
 
@@ -60,23 +61,7 @@ const state = {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-/* 映射表和正则提到模块级：esc 是列表渲染里的热点，
-原来每遇到一个待转义字符就新建一次对象字面量。 */
-const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-const ESC_RE = /[&<>"']/g;
-
-function esc(value) {
-  return String(value ?? "").replace(ESC_RE, (c) => ESC_MAP[c]);
-}
-
 /* --- 颜色 ---------------------------------------------------------------- */
-
-function hexToRgb(hex) {
-  const raw = String(hex || "#999999").replace("#", "");
-  const full = raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw;
-  const num = parseInt(full, 16);
-  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
-}
 
 /* 情绪色与强度色来自后端，是为浅底调的。深色下整体提亮、略降饱和，
 否则墨绿纸底换成暖炭底之后这些点会糊成一团。
@@ -85,6 +70,7 @@ function hexToRgb(hex) {
 const colorCache = new Map();
 
 function adapt(hex) {
+  hex = safeColor(hex);
   if (theme.resolved !== "dark") return hex;
   let hit = colorCache.get(hex);
   if (hit === undefined) {
@@ -92,33 +78,6 @@ function adapt(hex) {
     colorCache.set(hex, hit);
   }
   return hit;
-}
-
-function brighten(hex) {
-  const [r, g, b] = hexToRgb(hex).map((v) => v / 255);
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  if (l >= 0.6) return hex;
-  const d = max - min;
-  let h = 0;
-  if (d) {
-    if (max === r) h = ((g - b) / d) % 6;
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  const s = d === 0 ? 0 : Math.min(0.72, d / (1 - Math.abs(2 * l - 1)));
-  return hslToHex(h, s, 0.64);
-}
-
-function hslToHex(h, s, l) {
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = l - c / 2;
-  const seg = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][Math.floor(h / 60) % 6];
-  return "#" + seg.map((v) => Math.round((v + m) * 255).toString(16).padStart(2, "0")).join("");
 }
 
 const rgbaCache = new Map();
@@ -162,48 +121,6 @@ function offsetLabel(minutes = 0) {
 function entryTime(entry) {
   const date = new Date(new Date(entry.occurred_at).getTime() + (entry.tz_offset || 0) * 60000);
   return `${entry.local_date || date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)}`;
-}
-
-/* toLocaleTimeString / toLocaleDateString 每次调用都要重建一个 Intl 格式化器，
-一条记录要两次，上千条就是几千次——这是长列表里最贵的一块。
-格式化器按语言缓存，格式化结果再按 ISO 串缓存（记录的时间不会变）。
-代号里带分钟桶，因为「今天 / 昨天」跨零点之后会变。 */
-let fmt = { gen: "" };
-const labelCache = new Map();
-
-const dayStamp = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-
-function formatters() {
-  const lang = getLang();
-  const gen = `${lang}|${Math.floor(Date.now() / 60000)}`;
-  if (fmt.gen === gen) return fmt;
-  const loc = lang === "zh" ? "zh-CN" : "en-US";
-  const now = new Date();
-  fmt = {
-    gen,
-    time: new Intl.DateTimeFormat(loc, { hour: "2-digit", minute: "2-digit", hour12: lang !== "zh" }),
-    date: new Intl.DateTimeFormat(loc, { month: "short", day: "numeric" }),
-    today: dayStamp(now),
-    yesterday: dayStamp(new Date(now.getTime() - 864e5)),
-  };
-  labelCache.clear();
-  return fmt;
-}
-
-function timeLabels(iso) {
-  const f = formatters();
-  const hit = labelCache.get(iso);
-  if (hit) return hit;
-  const d = new Date(iso);
-  const stamp = dayStamp(d);
-  const zh = getLang() === "zh";
-  let day;
-  if (stamp === f.today) day = zh ? "今天" : "Today";
-  else if (stamp === f.yesterday) day = zh ? "昨天" : "Yesterday";
-  else day = f.date.format(d);
-  const out = { day, time: f.time.format(d) };
-  labelCache.set(iso, out);
-  return out;
 }
 
 function sevMeter(n, color = sevColor(n)) {
@@ -344,7 +261,7 @@ async function loadAccount() {
 }
 
 let logSeq = 0;
-/* 记录页是翻页制：一页十条，翻页时整页替换并回到顶部，不做无限下拉。
+/* 记录页是翻页制：一页八条，翻页时整页替换并回到顶部，不做无限下拉。
    用 offset 分页（服务端同时支持 cursor 与 offset），这样能直接算出总页数，
    分页器显示「第 N / M 页」，也不会因为下拉加载让页面无限变长。 */
 async function loadEntries({ page = 0 } = {}) {
@@ -538,7 +455,6 @@ async function ensureViewData(view, { force = false, silent = false } = {}) {
       if (dayChanged) {
         invalidateInsights();
         state.logReady = false;
-        labelCache.clear();
       }
       const stale = force || dayChanged || Date.now() - loadedAt[view] >= REFRESH_AGE_MS;
       const jobs = [];
@@ -575,7 +491,7 @@ window.addEventListener("popstate", (event) => {
   }
   if (restoreCrisis()) return;
   if (sessionExpired) { renderAuth(); return; }
-  if (overlayInHistory && (iv.saving || expression.busy || crossing.busy)) {
+  if (overlayInHistory && (iv.saving || expression.busy)) {
     history.pushState({ view: state.view, overlay: true }, '', location.hash);
     return;
   }
@@ -624,6 +540,7 @@ function render() {
   else view.innerHTML = viewMe();
 }
 
+
 /* ------------------------------------------------------------- 现在视图 */
 
 function greeting() {
@@ -650,8 +567,8 @@ function emotionFace(key) {
 function emotionTile(emotion, primary) {
   const tint = rgba(emotion.color, primary ? 0.13 : 0.08);
   const branch = BRANCH_LABEL[emotion.branch] ? BRANCH_LABEL[emotion.branch][getLang()] : "";
-  return `<button class="emo-tile" data-act="pick" data-emotion="${emotion.key}"
-      style="--emo:${emotion.color};--emo-tint:${tint}">
+  return `<button class="emo-tile" data-act="pick" data-emotion="${esc(emotion.key)}"
+      style="--emo:${safeColor(emotion.color)};--emo-tint:${tint}">
       <span class="emo-face">${emotionFace(emotion.key)}</span>
       <span class="emo-label">${esc(emotion.label)}</span>
       <span class="emo-hint">${esc(emotion.hint)}</span>
@@ -710,7 +627,6 @@ function viewNow() {
     <div class="home-workspace">
     <div class="stack gap-16">
       ${expression.card()}
-      ${crossing.card()}
     </div>
 
     <aside class="home-aside stack gap-16">
@@ -817,7 +733,7 @@ function viewLog() {
     `<button class="chip ${state.filter.emotion === "all" ? "on" : ""}" data-act="filter" data-emotion="all">${t("log.all")}</button>`,
     ...emotions.map(
       (e) =>
-        `<button class="chip ${state.filter.emotion === e.key ? "on" : ""}" data-act="filter" data-emotion="${e.key}"><span class="dot" style="background:${adapt(e.color)}"></span>${esc(e.label)}</button>`
+        `<button class="chip ${state.filter.emotion === e.key ? "on" : ""}" data-act="filter" data-emotion="${esc(e.key)}"><span class="dot" style="background:${adapt(e.color)}"></span>${esc(e.label)}</button>`
     ),
   ].join("");
 
@@ -1300,6 +1216,15 @@ function viewMe() {
 
     ${installCard()}
 
+    <div class="card stack gap-8" id="handoff-card">
+      <div class="row-between">
+        <h2 class="eyebrow">${t("handoff.card_title")}</h2>
+        <span class="tiny">${t("handoff.card_badge")}</span>
+      </div>
+      <p class="tiny">${t("handoff.card_body")}</p>
+      <button class="btn soft sm block" data-act="handoff" style="align-self:flex-start">${t("handoff.card_action")}</button>
+    </div>
+
     <div class="card stack gap-8">
       <h2 class="eyebrow">${t("me.settings")}</h2>
       <div class="list-row">
@@ -1438,7 +1363,7 @@ function destroyOverlay() {
   ++crisisSeq;
   expression.detach();
   practice.dispose();
-  crossing.detach();
+  handoff.reset();
   iv.draft = null;
   iv.token += 1;
   iv.nodes = null;
@@ -1458,7 +1383,7 @@ function destroyOverlay() {
 
 function closeOverlay() {
   if (restoreCrisis()) { pendingPop += 1; history.back(); return; }
-  if (iv.saving || expression.busy || crossing.busy) return;
+  if (iv.saving || expression.busy) return;
   if (practice.active) { practice.leave(); return; }
   const popNeeded = overlayInHistory;
   destroyOverlay();
@@ -1816,7 +1741,7 @@ function crisisLines(lines) {
         ${
           line.number
         ? `<a class="btn sm" href="tel:${esc(line.number)}">${t("iv.call")}</a>`
-            : `<a class="btn sm ghost" href="${esc(line.url)}" target="_blank" rel="noopener" aria-label="${esc(line.name)}">↗</a>`
+            : `<a class="btn sm ghost" href="${safeHref(line.url)}" target="_blank" rel="noopener" aria-label="${esc(line.name)}">↗</a>`
         }
       </div>`
     )
@@ -2282,7 +2207,6 @@ async function switchLang(lang) {
   try {
     await loadMeta();
     invalidateInsights();
-    labelCache.clear(); // 日期标签里有「今天 / 昨天」，换语言要重算
     await refresh({ entries: true, account: true, insights: state.view === "insights" });
   } catch (err) {
     toast(err.message);
@@ -2332,7 +2256,7 @@ const practice = createPracticeController({
 });
 
 const expression = createExpressionController({
-  api, t, esc, getLang, tzOffset, overlay, open: openOverlay, close: closeOverlay, confirm: askConfirm, toast, render,
+  api, t, esc, tzOffset, overlay, open: openOverlay, close: closeOverlay, confirm: askConfirm, toast, render,
   getAccount: () => state.account, getEmotions: () => state.meta?.emotions || [], changed: entriesChanged,
   download: (text) => {
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
@@ -2346,13 +2270,9 @@ const expression = createExpressionController({
   },
 });
 
-const crossing = createCrossingController({
-  api, t, esc, getLang, overlay, open: openOverlay, close: closeOverlay, toast,
-  getAccount: () => state.account,
-  getAI: () => (state.meta ? state.meta.ai : null) || {},
-  getLanguages: () => (state.meta && state.meta.languages) || [],
+const handoff = createHandoffController({
+  api, t, esc, overlay, open: openOverlay, close: closeOverlay, toast,
 });
-
 const ACTIONS = {
   "retry-log": () => loadEntries({ page: state.logPage }),
   "entry-practice": async (node) => {
@@ -2424,6 +2344,7 @@ const ACTIONS = {
   older: async () => { state.filter.older = !state.filter.older; await loadEntries(); render(); },
   "complete-next": () => completeNext(),
   import: () => $("#import-file").click(),
+  handoff: () => handoff.handle("open", { dataset: {} }),
   paywall: () => openRedeem(),
   wheel: () => openWheel(),
   "wheel-spin": () => spinWheel(),
@@ -2507,12 +2428,12 @@ document.addEventListener("click", async (event) => {
     try { await expression.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
     return;
   }
-  if (node.dataset.act.startsWith("p-")) {
-    try { await practice.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
+  if (node.dataset.act.startsWith("h-")) {
+    try { await handoff.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
     return;
   }
-  if (node.dataset.act.startsWith("c-")) {
-    try { await crossing.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
+  if (node.dataset.act.startsWith("p-")) {
+    try { await practice.handle(node.dataset.act.slice(2), node); } catch (err) { toast(err.message); }
     return;
   }
   if (action) {
@@ -2523,7 +2444,7 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("input", (event) => {
   expression.input(event.target);
   practice.input(event.target);
-  crossing.input(event.target);
+  handoff.input(event.target);
   if (event.target.name === 'new_password') {
     const value = event.target.value;
     const key = value.length < 8 ? 'auth.hint_pass' : value.length < 12 || new Set(value).size < 4 ? 'me.password_fair' : 'me.password_stronger';
@@ -2534,7 +2455,6 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   expression.change(event.target);
-  crossing.change(event.target);
   if (event.target.id === "import-file") { await importFile(event.target.files[0]); event.target.value = ""; return; }
   const node = event.target.closest("[data-act='region']");
   if (!node) return;
@@ -3051,24 +2971,13 @@ async function doChangePassword() {
 
 /* --------------------------------------------------------------- 启动 */
 
-/* 语言优先级：本机选过 > 账号里明确设过 > 浏览器语言 > 中文。
-   抽成纯函数，测试和 boot 用同一套判断。 */
-function browserLangTag() {
-  try {
-    return (navigator.language || (navigator.languages && navigator.languages[0]) || "").toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function normalizeLang(tag) {
-  return String(tag || "").toLowerCase().startsWith("zh") ? "zh" : "en";
-}
-
-function pickInitialLang(stored, browserTag, metaLang, metaLangSet) {
+/* 语言优先级：本机选过 > 账号里明确设过 > 中文。
+   产品面向国内用户，所以默认就是中文；英文是可选的第二语言，
+   不再跟随浏览器语言（在英文系统上打开也先给中文，需要时自己切）。 */
+function pickInitialLang(stored, metaLang, metaLangSet) {
   if (stored === "zh" || stored === "en") return stored;
   if (metaLangSet && (metaLang === "zh" || metaLang === "en")) return metaLang;
-  return normalizeLang(browserTag);
+  return "zh";
 }
 
 async function boot() {
@@ -3082,8 +2991,8 @@ async function boot() {
   } catch {
     /* 无痕模式：用默认值 */
   }
-  /* 优先级：本机选过 > 账号里明确设过 > 浏览器语言 > 中文。 */
-  const initial = pickInitialLang(storedLang, browserLangTag(), null, false);
+  /* 优先级：本机选过 > 账号里明确设过 > 中文。 */
+  const initial = pickInitialLang(storedLang, null, false);
   setLang(initial);
   setApiLang(initial);
   applyStaticText();
@@ -3102,7 +3011,7 @@ async function boot() {
     state.total = payload.home.total;
     $('#plan-chip').hidden = !state.account.pro;
     $('#plan-chip').textContent = state.account.pro ? 'PRO' : '';
-    const effective = pickInitialLang(storedLang, browserLangTag(), state.meta.lang, state.meta.lang_set);
+    const effective = pickInitialLang(storedLang, state.meta.lang, state.meta.lang_set);
     if (effective !== initial) {
       setLang(effective);
       setApiLang(effective);

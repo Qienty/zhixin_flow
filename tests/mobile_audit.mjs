@@ -240,43 +240,29 @@ async function runDevice(browser, device) {
     warn(d, "表达浮层", "未找到入口");
   }
 
-  // 4) 跨语言：场景选择 → 表单
-  const scene = page.locator('[data-act="c-start"]').first();
-  if (await scene.count()) {
-    await scene.click();
-    await page.waitForTimeout(500);
-    auditMeasure(d, "跨语言表单", await measure(page));
-    await shot(page, d, "04-crossing-form");
-    const field = page.locator('[data-cross-field="what"]');
-    await field.fill("手机上要能顺畅输入");
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(400);
-  } else {
-    warn(d, "跨语言表单", "未找到场景入口");
-  }
-
+  // 4) 自由表达已在上一步验过；直接进入练习页
   // 5) 练习页
   await page.locator('.tab[data-view="practice"]').click();
   await page.waitForTimeout(1200);
   auditMeasure(d, "练习页", await measure(page));
-  await shot(page, d, "05-practice");
+  await shot(page, d, "04-practice");
 
   // 6) 总结页
   await page.locator('.tab[data-view="insights"]').click();
   await page.waitForTimeout(1200);
   auditMeasure(d, "总结页", await measure(page));
-  await shot(page, d, "06-insights");
+  await shot(page, d, "05-insights");
 
   // 7) 我的页 + 深色主题
   await page.locator('.tab[data-view="me"]').click();
   await page.waitForTimeout(800);
   auditMeasure(d, "我的页", await measure(page));
-  await shot(page, d, "07-me");
+  await shot(page, d, "06-me");
 
   await page.locator('[data-act="theme"]').click();
   await page.waitForTimeout(500);
   auditMeasure(d, "深色主题", await measure(page));
-  await shot(page, d, "08-dark");
+  await shot(page, d, "07-dark");
   await page.locator('[data-act="theme"]').click();
   await page.waitForTimeout(300);
 
@@ -286,7 +272,7 @@ async function runDevice(browser, device) {
   await page.locator('.tab[data-view="now"]').click();
   await page.waitForTimeout(800);
   auditMeasure(d, "英文首页", await measure(page));
-  await shot(page, d, "09-english");
+  await shot(page, d, "08-english");
 
   // 9) 已安装形态（standalone）与离线壳
   // 断网之后的网络失败是预期的，只统计在线阶段的报错。
@@ -304,7 +290,7 @@ async function runDevice(browser, device) {
     await page.waitForTimeout(900);
     offlineOk = (await page.locator("#view, .tabbar, .auth-wrap").count()) > 0;
     auditMeasure(d, "离线壳", await measure(page));
-    await shot(page, d, "10-offline");
+    await shot(page, d, "09-offline");
   } catch (err) {
     offlineOk = false;
     fail(d, "离线壳不可用", String(err).slice(0, 120));
