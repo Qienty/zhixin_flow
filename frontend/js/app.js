@@ -2417,6 +2417,9 @@ const ACTIONS = {
 };
 
 document.addEventListener("click", async (event) => {
+  const day = event.target.closest(".intensity-day");
+  document.querySelectorAll(".intensity-day.tip").forEach((n) => { if (n !== day) n.classList.remove("tip"); });
+  if (day) day.classList.toggle("tip");
   const node = event.target.closest("[data-act]");
   if (!node) {
     // 点浮层背景（不是卡片本身）关闭
